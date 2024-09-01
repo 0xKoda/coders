@@ -3,7 +3,7 @@
 Coders is an AI-powered command-line tool that helps you create, modify and improve your code.
 
 ## Features
-- Ceate complete files, patch, find and fix bugs, and much more
+- Create complete files, patch, find and fix bugs, and much more
 - Diff view output: view changes in the terminal before accepting
 - Hybrid Model selection: choose between various models from different providers
 - Quickly iterate on code and run within the terminal.
