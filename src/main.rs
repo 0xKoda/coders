@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 use colored::*;
 use std::time::Duration;
-use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone, ValueEnum)]
@@ -84,6 +83,8 @@ struct Cli {
     model: bool,
     #[arg(short, long)]
     openrouter: bool,
+    #[arg(short, long, help = "Reset API key")]
+    reset: bool,
 }
 
 fn select_model(is_openrouter: bool) -> Result<String> {
@@ -123,7 +124,16 @@ fn select_model(is_openrouter: bool) -> Result<String> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
+    if cli.reset {
+        if cli.openrouter {
+            reset_api_key("OpenRouter")?;
+        } else {
+            reset_api_key("Hyperbolic")?;
+        }
+        return Ok(());
+    }
+
     let api_key = if cli.openrouter {
         get_or_prompt_for_api_key("OpenRouter").await?
     } else {
@@ -156,10 +166,25 @@ async fn main() -> Result<()> {
             show_diff_and_prompt_for_changes(&file_content, &content, &cli.file)?;
         }
         None => {
-            println!("No response received from the API.");
+            println!("No valid response received from the API.");
         }
     }
 
+    Ok(())
+}
+
+fn reset_api_key(provider: &str) -> Result<()> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+    let config_file = config_dir.join(format!("{}_api_key.txt", provider.to_lowercase()));
+
+    if config_file.exists() {
+        std::fs::remove_file(&config_file)?;
+        println!("{} API key has been reset. You will be prompted for a new key on the next run.", provider);
+    } else {
+        println!("No existing {} API key found. You will be prompted for a key on the next run.", provider);
+    }
+    
     Ok(())
 }
 
@@ -168,19 +193,14 @@ async fn get_or_prompt_for_api_key(api_name: &str) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
     let config_file = config_dir.join(format!("{}_api_key.txt", api_name.to_lowercase()));
 
-    println!("Checking for {} API key at: {:?}", api_name, config_file);
-
     let api_key = if config_file.exists() {
-        println!("Found existing {} API key file", api_name);
         let api_key = fs::read_to_string(&config_file)?;
         if api_key.trim().is_empty() {
-            println!("Existing {} API key file is empty", api_name);
             prompt_and_save_api_key(api_name, &config_file)?
         } else {
             api_key.trim().to_string()
         }
     } else {
-        println!("No existing {} API key file found", api_name);
         prompt_and_save_api_key(api_name, &config_file)?
     };
 
@@ -243,6 +263,7 @@ async fn send_request_to_hyperbolic(api_key: &str, context: &str, model: &str, f
     } else {
         "https://api.hyperbolic.xyz/v1/chat/completions"
     };
+    println!("Sending request to Hyperbolic API: {}", url);
 
     let language = get_file_language(file_path);
     let user_message = format!("The following code is in {}. {}", language, context);
@@ -277,11 +298,9 @@ async fn send_request_to_hyperbolic(api_key: &str, context: &str, model: &str, f
             "stream": false
         })
     };
-
-    println!("Sending request to Hyperbolic API: {}", url);
     println!("Request body: {}", serde_json::to_string_pretty(&request_body)?);
 
-    let spinner = display_waiting_message();
+    let spinner = display_waiting_message("Sending request...");
 
     let response = client.post(url)
         .header("Content-Type", "application/json")
@@ -291,20 +310,32 @@ async fn send_request_to_hyperbolic(api_key: &str, context: &str, model: &str, f
         .await?;
 
     spinner.finish_and_clear();
-
     println!("Response status: {}", response.status());
 
-    let body = response.text().await?;
-    println!("Response body: {}", body);
-
-    if body.is_empty() {
-        println!("Received empty response from Hyperbolic API");
-        return Ok(None);
+    if response.status().is_success() {
+        let spinner = display_waiting_message("Processing response...");
+        let body = response.text().await?;
+        println!("Response body: {}", body);
+        if body.is_empty() {
+            spinner.finish_and_clear();
+            println!("Received empty response from Hyperbolic API");
+            return Ok(None);
+        }
+        let json_response: serde_json::Value = serde_json::from_str(&body)?;
+        spinner.finish_and_clear();
+        
+        // Extract the content from the correct location in the JSON response
+        let content = if model == "meta-llama/Meta-Llama-3.1-405B" {
+            json_response["choices"][0]["text"].as_str()
+        } else {
+            json_response["choices"][0]["message"]["content"].as_str()
+        };
+        
+        Ok(content.map(String::from))
+    } else {
+        println!("Error response: {}", response.text().await?);
+        Ok(None)
     }
-
-    let json_response: serde_json::Value = serde_json::from_str(&body)?;
-
-    Ok(json_response["choices"][0]["text"].as_str().map(String::from))
 }
 
 async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, file_path: &str) -> Result<Option<String>> {
@@ -333,10 +364,7 @@ async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, f
         "top_p": 0.9,
     });
 
-    println!("Sending request to OpenRouter API: {}", url);
-    println!("Request body: {}", serde_json::to_string_pretty(&request_body)?);
-
-    let spinner = display_waiting_message();
+    let spinner = display_waiting_message("Sending request...");
 
     let response = client.post(url)
         .header("Content-Type", "application/json")
@@ -347,22 +375,23 @@ async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, f
 
     spinner.finish_and_clear();
 
-    println!("Response status: {}", response.status());
-
-    let body = response.text().await?;
-    println!("Response body: {}", body);
-
-    if body.is_empty() {
-        println!("Received empty response from OpenRouter API");
-        return Ok(None);
+    if response.status().is_success() {
+        let spinner = display_waiting_message("Processing response...");
+        let body = response.text().await?;
+        println!("Response body: {}", body);
+        if body.is_empty() {
+            spinner.finish_and_clear();
+            return Ok(None);
+        }
+        let json_response: serde_json::Value = serde_json::from_str(&body)?;
+        spinner.finish_and_clear();
+        Ok(json_response["choices"][0]["message"]["content"].as_str().map(String::from))
+    } else {
+        Ok(None)
     }
-
-    let json_response: serde_json::Value = serde_json::from_str(&body)?;
-
-    Ok(json_response["choices"][0]["message"]["content"].as_str().map(String::from))
 }
 
-fn display_waiting_message() -> ProgressBar {
+fn display_waiting_message(message: &str) -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -371,7 +400,7 @@ fn display_waiting_message() -> ProgressBar {
             .unwrap()
     );
 
-    spinner.set_message("Awaiting response...".blue().to_string());
+    spinner.set_message(message.blue().to_string());
     spinner.enable_steady_tick(Duration::from_millis(100));
 
     spinner
@@ -414,7 +443,6 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
         }
     }
 
-    // Handle added lines
     for (i, new_line) in new_lines.iter().enumerate().skip(original_lines.len()) {
         changes.push(Change {
             change_type: ChangeType::Insert,
@@ -424,7 +452,7 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
         updated_lines.push(new_line);
     }
 
-    // Handle deleted lines
+
     for i in new_lines.len()..original_lines.len() {
         changes.push(Change {
             change_type: ChangeType::Delete,
@@ -469,11 +497,11 @@ fn full_file_diff(original_lines: &[&str], new_lines: &[&str]) -> (String, Vec<C
 }
 
 fn show_diff_and_prompt_for_changes(original: &str, new: &str, file_path: &str) -> std::io::Result<()> {
-    println!("\nProposed changes:");
-    println!("------------------");
-
     let extracted_code = extract_code_from_response(new);
     let (updated_content, changes) = smart_merge(original, &extracted_code);
+
+    println!("\nProposed changes:");
+    println!("------------------");
 
     for change in &changes {
         match change.change_type {
