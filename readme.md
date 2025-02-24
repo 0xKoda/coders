@@ -4,8 +4,8 @@ Coders is an AI-powered command-line tool that helps you create, modify and impr
 
 ## Features
 - Create complete files, patch, find and fix bugs, and much more
-- Hybrid Model selection: choose between various models from different providers
-- Quickly iterate on code and run within the terminal.
+- Flexible model selection: choose between default models or specify your own
+- Quickly iterate on code and run within the terminal
 - Diff view output: view changes in the terminal before accepting
 
 
@@ -14,30 +14,26 @@ Coders is an AI-powered command-line tool that helps you create, modify and impr
 
 ## Options
 
-- `-f, --file <FILE>`: Specify the file to process (required)
-- `-m, --model`: Enable model selection
+- `-f, --file <FILE>`: Specify the file to process (required unless using --reset)
+- `-m, --model`: Enable interactive model selection
+- `-c, --claude`: Use Claude 3.7 Sonnet model
+- `-g, --gemini`: Use Gemini 2.0 Flash model
+- `-u, --custom-model <MODEL>`: Use a custom model by providing its name
+- `-r, --reset`: Reset API key (will prompt for a new one on next run)
+- `-v, --verbose`: Enable verbose output
 - `-h, --help`: Display help information and all available options
 - `-V, --version`: Print version information
 
-## Available Models
-[OpenRouter]
-- nousresearch/hermes-3-llama-3.1-405b
-- nousresearch/hermes-3-llama-3.1-405b:extended
-- meta-llama/llama-3.1-8b-instruct:free
+## Default Models
+The application uses OpenRouter as the AI provider with two default models:
+- `anthropic/claude-3.7-sonnet:beta`: Claude 3.7 Sonnet (default)
+- `google/gemini-2.0-flash-001`: Gemini 2.0 Flash
 
-[Hyperbolic]
-- NousResearch/Hermes-3-Llama-3.1-70B
-- meta-llama/Meta-Llama-3.1-70B-Instruct
-- meta-llama/Meta-Llama-3.1-8B-Instruct
-- meta-llama/Meta-Llama-3-70B-Instruct
-- meta-llama/Meta-Llama-3.1-405B-Instruct
-
-### Best model for code editing
-- nousresearch/hermes-3-llama-3.1-405b:extended
+You can also specify any other model available on OpenRouter using the `-u/--custom-model` option.
 
 ## First-time Setup
 
-On the first run, you'll be prompted to enter your API key. This key will be saved for future use. Hyperbolic provides free signup credits. Openrouter provides nousresearch hermes-3-llama-3.1-405b for free currently.
+On the first run, you'll be prompted to enter your OpenRouter API key. This key will be saved for future use. If you need to reset your API key, use the `--reset` flag.
 
 ## Workflow
 

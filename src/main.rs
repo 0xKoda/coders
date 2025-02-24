@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use reqwest::Client;
 use serde_json::json;
 use std::fs;
@@ -10,94 +10,127 @@ use colored::*;
 use std::time::Duration;
 use std::path::Path;
 
-#[derive(Clone, ValueEnum)]
-enum OpenRouterModel {
-    #[value(name = "nousresearch/hermes-3-llama-3.1-405b")]
-    NousHermes3Llama31405B,
-    #[value(name = "nousresearch/hermes-3-llama-3.1-405b:extended")]
-    NousHermes3Llama31405BExtended,
-    #[value(name = "meta-llama/llama-3.1-8b-instruct:free")]
-    MetaLlama318BInstructFree,
-}
-
-#[derive(Clone, ValueEnum)]
-enum HyperbolicModel {
-    #[value(name = "nous-hermes-3-llama-3-1-70b")]
-    NousHermes3Llama3170B,
-    #[value(name = "meta-llama-3-1-70b-instruct")]
-    MetaLlama3170BInstruct,
-    #[value(name = "meta-llama-3-1-8b-instruct")]
-    MetaLlama318BInstruct,
-    #[value(name = "meta-llama-3-1-405b-instruct")]
-    MetaLlama31405BInstruct,
-    #[value(name = "meta-llama-3-1-405b")]
-    MetaLlama31405B,
-}
-
-impl OpenRouterModel {
-    fn as_str(&self) -> &'static str {
-        match self {
-            OpenRouterModel::NousHermes3Llama31405B => "nousresearch/hermes-3-llama-3.1-405b",
-            OpenRouterModel::NousHermes3Llama31405BExtended => "nousresearch/hermes-3-llama-3.1-405b:extended",
-            OpenRouterModel::MetaLlama318BInstructFree => "meta-llama/llama-3.1-8b-instruct:free",
-        }
-    }
-
-    fn all() -> Vec<OpenRouterModel> {
-        vec![
-            OpenRouterModel::NousHermes3Llama31405B,
-            OpenRouterModel::NousHermes3Llama31405BExtended,
-            OpenRouterModel::MetaLlama318BInstructFree,
-        ]
-    }
-}
-
-impl HyperbolicModel {
-    fn as_str(&self) -> &'static str {
-        match self {
-            HyperbolicModel::NousHermes3Llama3170B => "NousResearch/Hermes-3-Llama-3.1-70B",
-            HyperbolicModel::MetaLlama3170BInstruct => "meta-llama/Meta-Llama-3.1-70B-Instruct",
-            HyperbolicModel::MetaLlama318BInstruct => "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            HyperbolicModel::MetaLlama31405BInstruct => "meta-llama/Meta-Llama-3.1-405B-Instruct",
-            HyperbolicModel::MetaLlama31405B => "meta-llama/Meta-Llama-3.1-405B",
-        }
-    }
-
-    fn all() -> Vec<HyperbolicModel> {
-        vec![
-            HyperbolicModel::NousHermes3Llama3170B,
-            HyperbolicModel::MetaLlama3170BInstruct,
-            HyperbolicModel::MetaLlama318BInstruct,
-            HyperbolicModel::MetaLlama31405BInstruct,
-            HyperbolicModel::MetaLlama31405B,
-        ]
-    }
-}
+// Default models for OpenRouter
+const DEFAULT_CLAUDE: &str = "anthropic/claude-3.7-sonnet:beta";
+const DEFAULT_GEMINI: &str = "google/gemini-2.0-flash-001";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[arg(short, long)]
-    file: String,
-    #[arg(short, long)]
+    #[arg(short, long, required_unless_present = "reset")]
+    file: Option<String>,
+    
+    #[arg(short, long, help = "Select a model interactively")]
     model: bool,
-    #[arg(short, long)]
-    openrouter: bool,
+    
+    #[arg(short = 'u', long, help = "Use custom model (provide model name)")]
+    custom_model: Option<String>,
+    
+    #[arg(
+        short = 'c', 
+        long, 
+        help = "Use Claude 3.7 Sonnet (anthropic/claude-3.7-sonnet:beta)"
+    )]
+    claude: bool,
+    
+    #[arg(
+        short = 'g', 
+        long, 
+        help = "Use Gemini 2.0 Flash (google/gemini-2.0-flash-001)"
+    )]
+    gemini: bool,
+    
     #[arg(short, long, help = "Reset API key")]
     reset: bool,
+    
+    #[arg(short, long, help = "Enable verbose output")]
+    verbose: bool,
 }
 
-fn select_model(is_openrouter: bool) -> Result<String> {
-    println!("Select a model:");
-    if is_openrouter {
-        for (i, model) in OpenRouterModel::all().iter().enumerate() {
-            println!("{}. {}", i + 1, model.as_str());
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    
+    println!("Starting code-ai application");
+
+    if cli.reset {
+        reset_api_key("OpenRouter")?;
+        return Ok(());
+    }
+
+    // Since we're not resetting, file must be present at this point
+    let file_path = cli.file.as_deref().unwrap();
+
+    let api_key = get_or_prompt_for_api_key("OpenRouter").await?;
+
+    // Read the input file
+    if cli.verbose {
+        println!("Reading file: {}", file_path);
+    }
+    let file_content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path))?;
+
+    // Get user prompt
+    let prompt = prompt_for_user_input()?;
+    let context = format!("{}\n\n{}", prompt, file_content);
+
+    // Determine which model to use
+    let model = determine_model(&cli)?;
+    println!("Using model: {}", model);
+
+    // Send request to OpenRouter
+    let response = send_request_to_openrouter(&api_key, &context, &model, file_path, cli.verbose).await?;
+
+    match response {
+        Some(content) => {
+            println!("API Response:\n{}", content);
+            show_diff_and_prompt_for_changes(&file_content, &content, file_path)?;
         }
-    } else {
-        for (i, model) in HyperbolicModel::all().iter().enumerate() {
-            println!("{}. {}", i + 1, model.as_str());
+        None => {
+            eprintln!("No valid response received from the API.");
+            println!("No valid response received from the API.");
         }
     }
+
+    Ok(())
+}
+
+fn determine_model(cli: &Cli) -> Result<String> {
+    if let Some(custom_model) = &cli.custom_model {
+        // User provided a custom model name
+        if cli.verbose {
+            println!("Using custom model: {}", custom_model);
+        }
+        return Ok(custom_model.clone());
+    }
+    
+    if cli.claude {
+        // Use Claude model
+        return Ok(DEFAULT_CLAUDE.to_string());
+    }
+    
+    if cli.gemini {
+        // Use Gemini model
+        return Ok(DEFAULT_GEMINI.to_string());
+    }
+    
+    if cli.model {
+        // Interactive model selection
+        return select_model_interactive();
+    }
+    
+    // Default to Claude if no option specified
+    if cli.verbose {
+        println!("No model specified, defaulting to Claude 3.7 Sonnet");
+    }
+    Ok(DEFAULT_CLAUDE.to_string())
+}
+
+fn select_model_interactive() -> Result<String> {
+    println!("Select a model:");
+    println!("1. {} (Claude 3.7 Sonnet)", DEFAULT_CLAUDE);
+    println!("2. {} (Gemini 2.0 Flash)", DEFAULT_GEMINI);
+    println!("3. Enter custom model name");
 
     loop {
         print!("Enter the number of your choice: ");
@@ -105,72 +138,19 @@ fn select_model(is_openrouter: bool) -> Result<String> {
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
 
-        if let Ok(choice) = input.trim().parse::<usize>() {
-            if is_openrouter {
-                if choice > 0 && choice <= OpenRouterModel::all().len() {
-                    return Ok(OpenRouterModel::all()[choice - 1].as_str().to_string());
-                }
-            } else {
-                if choice > 0 && choice <= HyperbolicModel::all().len() {
-                    return Ok(HyperbolicModel::all()[choice - 1].as_str().to_string());
-                }
+        match input.trim() {
+            "1" => return Ok(DEFAULT_CLAUDE.to_string()),
+            "2" => return Ok(DEFAULT_GEMINI.to_string()),
+            "3" => {
+                print!("Enter the custom model name: ");
+                io::stdout().flush()?;
+                let mut model_name = String::new();
+                io::stdin().read_line(&mut model_name)?;
+                return Ok(model_name.trim().to_string());
             }
-        }
-
-        println!("Invalid choice. Please try again.");
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    if cli.reset {
-        if cli.openrouter {
-            reset_api_key("OpenRouter")?;
-        } else {
-            reset_api_key("Hyperbolic")?;
-        }
-        return Ok(());
-    }
-
-    let api_key = if cli.openrouter {
-        get_or_prompt_for_api_key("OpenRouter").await?
-    } else {
-        get_or_prompt_for_api_key("Hyperbolic").await?
-    };
-
-    let file_content = fs::read_to_string(&cli.file)
-        .with_context(|| format!("Failed to read file: {}", cli.file))?;
-
-    let prompt = prompt_for_user_input()?;
-    let context = format!("{}\n\n{}", prompt, file_content);
-
-    let model = if cli.model {
-        select_model(cli.openrouter)?
-    } else if cli.openrouter {
-        OpenRouterModel::NousHermes3Llama31405B.as_str().to_string()
-    } else {
-        HyperbolicModel::MetaLlama31405BInstruct.as_str().to_string()
-    };
-
-    let response = if cli.openrouter {
-        send_request_to_openrouter(&api_key, &context, &model, &cli.file).await?
-    } else {
-        send_request_to_hyperbolic(&api_key, &context, &model, &cli.file).await?
-    };
-
-    match response {
-        Some(content) => {
-            println!("API Response:\n{}", content);
-            show_diff_and_prompt_for_changes(&file_content, &content, &cli.file)?;
-        }
-        None => {
-            println!("No valid response received from the API.");
+            _ => println!("Invalid choice. Please try again."),
         }
     }
-
-    Ok(())
 }
 
 fn reset_api_key(provider: &str) -> Result<()> {
@@ -219,7 +199,6 @@ async fn get_or_prompt_for_api_key(api_name: &str) -> Result<String> {
 async fn validate_api_key(api_name: &str, api_key: &str) -> Result<bool> {
     let client = Client::new();
     let url = match api_name {
-        "Hyperbolic" => "https://api.hyperbolic.xyz/v1/models",
         "OpenRouter" => "https://openrouter.ai/api/v1/models",
         _ => return Err(anyhow::anyhow!("Unknown API provider")),
     };
@@ -229,14 +208,18 @@ async fn validate_api_key(api_name: &str, api_key: &str) -> Result<bool> {
         .send()
         .await?;
 
-    Ok(response.status().is_success())
+    let is_valid = response.status().is_success();
+    if !is_valid && response.status().as_u16() != 404 {
+        eprintln!("API key validation failed with status: {}", response.status());
+    }
+    
+    Ok(is_valid)
 }
 
 fn prompt_and_save_api_key(api_name: &str, config_file: &PathBuf) -> Result<String> {
     let api_key = prompt_for_api_key(api_name)?;
     fs::create_dir_all(config_file.parent().unwrap())?;
     fs::write(config_file, &api_key)?;
-    println!("{} API key saved successfully", api_name);
     Ok(api_key)
 }
 
@@ -256,89 +239,13 @@ fn prompt_for_user_input() -> Result<String> {
     Ok(prompt.trim().to_string())
 }
 
-async fn send_request_to_hyperbolic(api_key: &str, context: &str, model: &str, file_path: &str) -> Result<Option<String>> {
-    let client = Client::new();
-    let url = if model == "meta-llama/Meta-Llama-3.1-405B" {
-        "https://api.hyperbolic.xyz/v1/completions"
-    } else {
-        "https://api.hyperbolic.xyz/v1/chat/completions"
-    };
-    println!("Sending request to Hyperbolic API: {}", url);
-
-    let language = get_file_language(file_path);
-    let user_message = format!("The following code is in {}. {}", language, context);
-
-    let request_body = if model == "meta-llama/Meta-Llama-3.1-405B" {
-        json!({
-            "model": model,
-            "prompt": user_message,
-            "max_tokens": 512,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "stream": false
-        })
-    } else {
-        json!({
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are an assistant helping a developer construct code. Follow instructions carefully and only output the code. Output only the changes, not the entire code"},
-                {"role": "user", "content": "add a var sydney to this code | var yemen = yemen "},
-                {"role": "assistant", "content": "```javascript\nvar yemen = yemen;\nvar sydney = sydney;```"},
-                {"role": "user", "content": "Add a function to calculate factorial in Python | def square(n): return n * n"},
-                {"role": "assistant", "content": "```python\ndef square(n): return n * n\ndef factorial(n):\n    if n == 0 or n == 1:\n        return 1\n    else:\n        return n * factorial(n - 1)```"},
-                {"role": "user", "content": "Fix the syntax error in this Rust code | fn main() { println(\"Hello, world!\"); }"},
-                {"role": "assistant", "content": "```rust\nfn main() {\n    println!(\"Hello, world!\");\n}```"},
-                {"role": "user", "content": "Add error handling to this JavaScript function | function divide(a, b) { return a / b; }"},
-                {"role": "assistant", "content": "```javascript\nfunction divide(a, b) {\n    if (b === 0) {\n        throw new Error(\"Division by zero\");\n    }\n    return a / b;\n}```"},
-                {"role": "user", "content": user_message}
-            ],
-            "max_tokens": 2048,
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "stream": false
-        })
-    };
-    println!("Request body: {}", serde_json::to_string_pretty(&request_body)?);
-
-    let spinner = display_waiting_message("Sending request...");
-
-    let response = client.post(url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&request_body)
-        .send()
-        .await?;
-
-    spinner.finish_and_clear();
-    println!("Response status: {}", response.status());
-
-    if response.status().is_success() {
-        let spinner = display_waiting_message("Processing response...");
-        let body = response.text().await?;
-        println!("Response body: {}", body);
-        if body.is_empty() {
-            spinner.finish_and_clear();
-            println!("Received empty response from Hyperbolic API");
-            return Ok(None);
-        }
-        let json_response: serde_json::Value = serde_json::from_str(&body)?;
-        spinner.finish_and_clear();
-        
-        // Extract the content from the correct location in the JSON response
-        let content = if model == "meta-llama/Meta-Llama-3.1-405B" {
-            json_response["choices"][0]["text"].as_str()
-        } else {
-            json_response["choices"][0]["message"]["content"].as_str()
-        };
-        
-        Ok(content.map(String::from))
-    } else {
-        println!("Error response: {}", response.text().await?);
-        Ok(None)
-    }
-}
-
-async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, file_path: &str) -> Result<Option<String>> {
+async fn send_request_to_openrouter(
+    api_key: &str, 
+    context: &str, 
+    model: &str, 
+    file_path: &str,
+    verbose: bool
+) -> Result<Option<String>> {
     let client = Client::new();
     let url = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -348,7 +255,7 @@ async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, f
     let request_body = json!({
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are an assistant helping a developer construct code. As you are a machine, you can only reply with code. Follow instructions carefully and only output the code. Output only the changes, not the entire code"},
+            {"role": "system", "content": "You are an assistant helping a developer construct code. Follow instructions carefully and only output the code. Output only the changes, not the entire code."},
             {"role": "user", "content": "add a var sydney to this code | var yemen = 'Middle Eastern country'; var australia = 'Down Under'; function getPopulation(country) { if (country === yemen) { return 30000000; } else if (country === australia) { return 25000000; } else { return 'Unknown'; } }"},
             {"role": "assistant", "content": "```javascript\nvar yemen = 'Middle Eastern country';\nvar australia = 'Down Under';\nvar sydney = 'Largest city in Australia';\n\nfunction getPopulation(country) {\n    if (country === yemen) {\n        return 30000000;\n    } else if (country === australia) {\n        return 25000000;\n    } else if (country === sydney) {\n        return 5000000;\n    } else {\n        return 'Unknown';\n    }\n}```"},
             {"role": "user", "content": "Add a function to calculate factorial in Python | def square(n): return n * n"},
@@ -364,6 +271,9 @@ async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, f
         "top_p": 0.9,
     });
 
+    if verbose {
+        println!("Sending request to OpenRouter with model: {}", model);
+    }
     let spinner = display_waiting_message("Sending request...");
 
     let response = client.post(url)
@@ -374,19 +284,36 @@ async fn send_request_to_openrouter(api_key: &str, context: &str, model: &str, f
         .await?;
 
     spinner.finish_and_clear();
+    if verbose {
+        println!("Response status: {}", response.status());
+    }
 
     if response.status().is_success() {
         let spinner = display_waiting_message("Processing response...");
         let body = response.text().await?;
-        println!("Response body: {}", body);
+        if verbose {
+            println!("Response body: {}", body);
+        }
+        
         if body.is_empty() {
             spinner.finish_and_clear();
+            println!("Received empty response from OpenRouter API");
             return Ok(None);
         }
+        
         let json_response: serde_json::Value = serde_json::from_str(&body)?;
         spinner.finish_and_clear();
-        Ok(json_response["choices"][0]["message"]["content"].as_str().map(String::from))
+        
+        let content = json_response["choices"][0]["message"]["content"].as_str();
+        if content.is_none() {
+            println!("Could not extract content from response");
+        }
+        
+        Ok(content.map(String::from))
     } else {
+        let error_text = response.text().await?;
+        eprintln!("API error response: {}", error_text);
+        println!("Error response: {}", error_text);
         Ok(None)
     }
 }
@@ -432,6 +359,7 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
     let mut updated_lines = original_lines.clone();
     let mut changes = Vec::new();
 
+    // Process matching line ranges
     for (i, (old_line, new_line)) in original_lines.iter().zip(new_lines.iter()).enumerate() {
         if old_line != new_line {
             changes.push(Change {
@@ -443,6 +371,7 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
         }
     }
 
+    // Process added lines
     for (i, new_line) in new_lines.iter().enumerate().skip(original_lines.len()) {
         changes.push(Change {
             change_type: ChangeType::Insert,
@@ -452,7 +381,7 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
         updated_lines.push(new_line);
     }
 
-
+    // Process removed lines
     for i in new_lines.len()..original_lines.len() {
         changes.push(Change {
             change_type: ChangeType::Delete,
@@ -467,6 +396,7 @@ fn smart_merge(original: &str, new: &str) -> (String, Vec<Change>) {
 fn full_file_diff(original_lines: &[&str], new_lines: &[&str]) -> (String, Vec<Change>) {
     let mut changes = Vec::new();
 
+    // Compare each line and record the differences
     for (i, line) in new_lines.iter().enumerate() {
         if i < original_lines.len() {
             if line != &original_lines[i] {
@@ -485,6 +415,7 @@ fn full_file_diff(original_lines: &[&str], new_lines: &[&str]) -> (String, Vec<C
         }
     }
 
+    // Mark lines that exist in original but not in new as deleted
     for i in new_lines.len()..original_lines.len() {
         changes.push(Change {
             change_type: ChangeType::Delete,
@@ -503,6 +434,7 @@ fn show_diff_and_prompt_for_changes(original: &str, new: &str, file_path: &str) 
     println!("\nProposed changes:");
     println!("------------------");
 
+    // Display changes with color coding
     for change in &changes {
         match change.change_type {
             ChangeType::Insert => println!("\x1b[32m+ {}:{}\x1b[0m", change.line_number, change.content),
@@ -528,9 +460,10 @@ fn show_diff_and_prompt_for_changes(original: &str, new: &str, file_path: &str) 
 }
 
 fn extract_code_from_response(response: &str) -> String {
+    // Extract code between the first pair of triple backticks
     response.lines()
         .skip_while(|line| !line.starts_with("```"))
-        .skip(1)
+        .skip(1)  // Skip the line with the opening backticks
         .take_while(|line| !line.starts_with("```"))
         .collect::<Vec<&str>>()
         .join("\n")
