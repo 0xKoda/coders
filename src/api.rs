@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::json;
-use std::path::Path;
-use std::time::SystemTime;
+use std::path::{Path, PathBuf};
 
 // Default models for OpenRouter
 pub const DEFAULT_CLAUDE: &str = "anthropic/claude-3.7-sonnet:beta";
@@ -146,7 +145,77 @@ pub async fn send_code_modification_request(
     }
 }
 
-/// Extract code blocks from the LLM response
+/// Process a response that may contain multiple file edits
+fn process_multi_file_response_internal(response: &str) -> Vec<(String, String)> {
+    // Log the response we're trying to process for multiple files
+    log::info!("Processing multi-file response: {}", response);
+    
+    let mut file_edits = Vec::new();
+    
+    // Check if the response contains multiple file sections
+    if response.contains("File:") || response.contains("file:") {
+        // Log that we detected a potential multi-file response
+        log::info!("Detected potential multi-file response");
+        
+        // Extract multiple files from the response
+        file_edits = extract_multiple_files_from_response(response);
+        
+        // Log what we found
+        log::info!("Extracted {} files from response", file_edits.len());
+        for (file, content) in &file_edits {
+            log::info!("Found file in response: {} with content length: {}", file, content.len());
+        }
+    } else {
+        log::info!("Response does not appear to contain multiple files");
+    }
+    
+    file_edits
+}
+
+/// Calculate diff between original and modified code
+fn calculate_diff(original: &str, modified: &str) -> Vec<crate::app::Change> {
+    let mut changes = Vec::new();
+    
+    // Split the original and modified code into lines
+    let original_lines: Vec<&str> = original.lines().collect();
+    let modified_lines: Vec<&str> = modified.lines().collect();
+    
+    // Use a simple line-by-line comparison for now
+    // This is a basic implementation and could be improved with a proper diff algorithm
+    let max_lines = std::cmp::max(original_lines.len(), modified_lines.len());
+    
+    for i in 0..max_lines {
+        let original_line = original_lines.get(i).map(|s| *s).unwrap_or("");
+        let modified_line = modified_lines.get(i).map(|s| *s).unwrap_or("");
+        
+        if i >= original_lines.len() {
+            // Line was added
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Insert,
+                line_number: i,
+                content: modified_line.to_string(),
+            });
+        } else if i >= modified_lines.len() {
+            // Line was deleted
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Delete,
+                line_number: i,
+                content: original_line.to_string(),
+            });
+        } else if original_line != modified_line {
+            // Line was modified
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Modify,
+                line_number: i,
+                content: modified_line.to_string(),
+            });
+        }
+    }
+    
+    changes
+}
+
+/// Extract code from the LLM response
 pub fn extract_code_from_response(response: &str) -> String {
     // Log the response we're trying to extract code from
     log::info!("Extracting code from response: {}", response);
@@ -156,7 +225,7 @@ pub fn extract_code_from_response(response: &str) -> String {
         log::info!("Detected multi-file response format, processing accordingly");
         
         // Process the multi-file response and get the files
-        let files = process_multi_file_response(response);
+        let files = process_multi_file_response_internal(response);
         
         // If we found files, return the content of the first one
         if !files.is_empty() {
@@ -196,141 +265,112 @@ pub fn extract_code_from_response(response: &str) -> String {
     code
 }
 
-/// Process a response that may contain multiple file edits
-pub fn process_multi_file_response(response: &str) -> Vec<(String, String)> {
-    // Log the response we're trying to process for multiple files
-    log::info!("Processing multi-file response: {}", response);
+/// Extract explanatory text from the response (text that's not inside code blocks)
+fn extract_explanation_text(response: &str) -> Option<String> {
+    let mut explanation_text = String::new();
+    let mut in_code_block = false;
+    let mut current_text = String::new();
     
-    let mut file_edits = Vec::new();
-    
-    // Check if the response contains multiple file sections
-    if response.contains("File:") || response.contains("file:") {
-        // Log that we detected a potential multi-file response
-        log::info!("Detected potential multi-file response");
-        
-        // Extract multiple files from the response
-        file_edits = extract_multiple_files_from_response(response);
-        
-        // Log what we found
-        log::info!("Extracted {} files from response", file_edits.len());
-        for (file, content) in &file_edits {
-            log::info!("Found file in response: {} with content length: {}", file, content.len());
-        }
-    } else {
-        log::info!("Response does not appear to contain multiple files");
-    }
-    
-    file_edits
-}
-
-/// Extract multiple files from a response
-fn extract_multiple_files_from_response(response: &str) -> Vec<(String, String)> {
-    let mut file_edits = Vec::new();
-    
-    // Split the response by lines for processing
-    let lines: Vec<&str> = response.lines().collect();
-    let mut i = 0;
-    
-    while i < lines.len() {
-        let line = lines[i].trim();
-        
-        // Log each line for detailed debugging
-        log::debug!("Processing line {}: {}", i, line);
-        
-        // Look for file markers
-        if line.contains("File:") || line.contains("file:") {
-            // Extract the file name
-            let file_name = extract_file_name(line);
-            log::info!("Found file marker at line {}: {}", i, file_name);
+    for line in response.lines() {
+        if line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
             
-            // Look for the start of a code block
-            let mut code_block_start = i + 1;
-            while code_block_start < lines.len() && !lines[code_block_start].trim().starts_with("```") {
-                code_block_start += 1;
-            }
-            
-            if code_block_start < lines.len() {
-                // Found the start of a code block
-                let mut code_block_end = code_block_start + 1;
-                while code_block_end < lines.len() && !lines[code_block_end].trim().starts_with("```") {
-                    code_block_end += 1;
-                }
-                
-                if code_block_end < lines.len() {
-                    // Found the end of a code block
-                    let mut code_content = String::new();
-                    
-                    // Skip the language identifier line if present
-                    let content_start = if code_block_start + 1 < code_block_end && 
-                                         (lines[code_block_start + 1].contains("javascript") || 
-                                          lines[code_block_start + 1].contains("python") ||
-                                          lines[code_block_start + 1].contains("rust") ||
-                                          lines[code_block_start + 1].contains("java") ||
-                                          lines[code_block_start + 1].contains("typescript")) {
-                        code_block_start + 2
-                    } else {
-                        code_block_start + 1
-                    };
-                    
-                    // Extract the code content
-                    for j in content_start..code_block_end {
-                        code_content.push_str(lines[j]);
-                        code_content.push('\n');
-                    }
-                    
-                    log::info!("Extracted code for file {} from lines {}-{}, content length: {}", 
-                              file_name, content_start, code_block_end, code_content.len());
-                    
-                    file_edits.push((file_name, code_content));
-                    
-                    // Move to the end of this code block
-                    i = code_block_end;
+            // If we're exiting a code block, add any accumulated text
+            if in_code_block {
+                if !current_text.trim().is_empty() {
+                    explanation_text.push_str(&current_text);
+                    explanation_text.push('\n');
+                    current_text.clear();
                 }
             }
+            continue;
         }
         
-        i += 1;
+        if !in_code_block {
+            current_text.push_str(line);
+            current_text.push('\n');
+        }
     }
     
-    file_edits
+    // Add any remaining text
+    if !current_text.trim().is_empty() {
+        explanation_text.push_str(&current_text);
+    }
+    
+    let trimmed = explanation_text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
-/// Helper function to extract file name from a line
-fn extract_file_name(line: &str) -> String {
-    // Try different formats of file markers
-    if let Some(pos) = line.find("File:") {
-        let file_part = &line[pos + 5..].trim();
-        // Extract until the end of line or until a special character
-        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
-            file_part[..end].trim().to_string()
-        } else {
-            file_part.to_string()
-        }
-    } else if let Some(pos) = line.find("file:") {
-        let file_part = &line[pos + 5..].trim();
-        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
-            file_part[..end].trim().to_string()
-        } else {
-            file_part.to_string()
-        }
-    } else if let Some(pos) = line.find("File ") {
-        let file_part = &line[pos + 5..].trim();
-        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
-            file_part[..end].trim().to_string()
-        } else {
-            file_part.to_string()
-        }
-    } else if let Some(pos) = line.find("file ") {
-        let file_part = &line[pos + 5..].trim();
-        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
-            file_part[..end].trim().to_string()
-        } else {
-            file_part.to_string()
-        }
-    } else {
-        // Default case if we can't extract a proper file name
-        "unknown_file".to_string()
+/// Process the response from the LLM
+pub async fn process_response(
+    response: String,
+    original_content: &str,
+    _file_path: &Path,
+) -> Result<crate::app::FileDiff> {
+    // Extract code from the response
+    let code = extract_code_from_response(&response);
+    
+    // Extract explanation text
+    let explanation_text = extract_explanation_text(&response);
+    
+    // Calculate diff
+    let changes = calculate_diff(original_content, &code);
+    
+    // Create FileDiff
+    let diff = crate::app::FileDiff {
+        original: original_content.to_string(),
+        modified: code,
+        changes,
+        explanation_text,
+    };
+    
+    Ok(diff)
+}
+
+/// Process a multi-file response
+pub async fn process_multi_file_response(
+    response: String,
+    files_content: &[(PathBuf, String)],
+) -> Result<Vec<(String, crate::app::FileDiff)>> {
+    // Extract explanation text first (before we process code blocks)
+    let explanation_text = extract_explanation_text(&response);
+    
+    // Extract multiple files from the response
+    let files = process_multi_file_response_internal(&response);
+    
+    let mut results = Vec::new();
+    
+    for (file_name, code) in files {
+        // Find the original content for this file
+        let original_content = files_content
+            .iter()
+            .find(|(path, _)| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string() == file_name)
+                    .unwrap_or(false)
+            })
+            .map(|(_, content)| content.clone())
+            .unwrap_or_default();
+        
+        // Calculate diff
+        let changes = calculate_diff(&original_content, &code);
+        
+        // Create FileDiff
+        let diff = crate::app::FileDiff {
+            original: original_content,
+            modified: code,
+            changes,
+            explanation_text: explanation_text.clone(),
+        };
+        
+        results.push((file_name, diff));
     }
+    
+    Ok(results)
 }
 
 /// Get the programming language from a file extension
@@ -581,4 +621,114 @@ pub async fn fetch_openrouter_credits(api_key: &str) -> Result<crate::app::Credi
         total_usage,
         last_updated: std::time::SystemTime::now(),
     })
+}
+
+/// Extract multiple files from a response
+fn extract_multiple_files_from_response(response: &str) -> Vec<(String, String)> {
+    let mut file_edits = Vec::new();
+    
+    // Split the response by lines for processing
+    let lines: Vec<&str> = response.lines().collect();
+    let mut i = 0;
+    
+    while i < lines.len() {
+        let line = lines[i].trim();
+        
+        // Log each line for detailed debugging
+        log::debug!("Processing line {}: {}", i, line);
+        
+        // Look for file markers
+        if line.contains("File:") || line.contains("file:") {
+            // Extract the file name
+            let file_name = extract_file_name(line);
+            log::info!("Found file marker at line {}: {}", i, file_name);
+            
+            // Look for the start of a code block
+            let mut code_block_start = i + 1;
+            while code_block_start < lines.len() && !lines[code_block_start].trim().starts_with("```") {
+                code_block_start += 1;
+            }
+            
+            if code_block_start < lines.len() {
+                // Found the start of a code block
+                let mut code_block_end = code_block_start + 1;
+                while code_block_end < lines.len() && !lines[code_block_end].trim().starts_with("```") {
+                    code_block_end += 1;
+                }
+                
+                if code_block_end < lines.len() {
+                    // Found the end of a code block
+                    let mut code_content = String::new();
+                    
+                    // Skip the language identifier line if present
+                    let content_start = if code_block_start + 1 < code_block_end && 
+                                         (lines[code_block_start + 1].contains("javascript") || 
+                                          lines[code_block_start + 1].contains("python") ||
+                                          lines[code_block_start + 1].contains("rust") ||
+                                          lines[code_block_start + 1].contains("java") ||
+                                          lines[code_block_start + 1].contains("typescript")) {
+                        code_block_start + 2
+                    } else {
+                        code_block_start + 1
+                    };
+                    
+                    // Extract the code content
+                    for j in content_start..code_block_end {
+                        code_content.push_str(lines[j]);
+                        code_content.push('\n');
+                    }
+                    
+                    log::info!("Extracted code for file {} from lines {}-{}, content length: {}", 
+                              file_name, content_start, code_block_end, code_content.len());
+                    
+                    file_edits.push((file_name, code_content));
+                    
+                    // Move to the end of this code block
+                    i = code_block_end;
+                }
+            }
+        }
+        
+        i += 1;
+    }
+    
+    file_edits
+}
+
+/// Helper function to extract file name from a line
+fn extract_file_name(line: &str) -> String {
+    // Try different formats of file markers
+    if let Some(pos) = line.find("File:") {
+        let file_part = &line[pos + 5..].trim();
+        // Extract until the end of line or until a special character
+        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
+            file_part[..end].trim().to_string()
+        } else {
+            file_part.to_string()
+        }
+    } else if let Some(pos) = line.find("file:") {
+        let file_part = &line[pos + 5..].trim();
+        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
+            file_part[..end].trim().to_string()
+        } else {
+            file_part.to_string()
+        }
+    } else if let Some(pos) = line.find("File ") {
+        let file_part = &line[pos + 5..].trim();
+        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
+            file_part[..end].trim().to_string()
+        } else {
+            file_part.to_string()
+        }
+    } else if let Some(pos) = line.find("file ") {
+        let file_part = &line[pos + 5..].trim();
+        if let Some(end) = file_part.find(|c: char| c == '`' || c == ':' || c == '(' || c == ')') {
+            file_part[..end].trim().to_string()
+        } else {
+            file_part.to_string()
+        }
+    } else {
+        // Default case if we can't extract a proper file name
+        "unknown_file".to_string()
+    }
 } 

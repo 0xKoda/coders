@@ -1,183 +1,194 @@
-use crate::app::{App, AppMode, ActivePanel, MessageType};
-use crate::tui::PromptResult;
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
-    Frame,
-};
+use crate::app::{App, AppMode, ActivePanel, MessageType, ProcessingState};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, Utc};
+use ratatui::{
+    prelude::*,
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Clear},
+};
 
 // Color theme
-const PRIMARY_COLOR: Color = Color::Rgb(65, 105, 225);      // Royal Blue
-const SECONDARY_COLOR: Color = Color::Rgb(106, 90, 205);    // Slate Blue
+const PRIMARY_COLOR: Color = Color::Cyan;
+const SECONDARY_COLOR: Color = Color::Yellow;
 const ACCENT_COLOR: Color = Color::Rgb(147, 112, 219);      // Medium Purple
-const HIGHLIGHT_COLOR: Color = Color::Rgb(138, 43, 226);    // Blue Violet
+const HIGHLIGHT_COLOR: Color = Color::Green;
 const BG_COLOR: Color = Color::Rgb(25, 25, 40);            // Dark Blue-Grey
-const SUCCESS_COLOR: Color = Color::Rgb(50, 205, 50);      // Lime Green
-const ERROR_COLOR: Color = Color::Rgb(255, 69, 0);         // Red-Orange
+const SUCCESS_COLOR: Color = Color::Green;
+const ERROR_COLOR: Color = Color::Red;
+const INFO_COLOR: Color = Color::Blue;
 
-/// Render the UI
+/// Render the main UI
 pub fn render(f: &mut Frame, app: &App) {
-    let area = f.size();
-    
-    // Split the screen into sections
+    // Create a layout for the main UI components
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Status bar
+            Constraint::Length(1),  // Status bar
             Constraint::Min(1),     // Main content
-            Constraint::Length(3),  // Message bar
-        ].as_ref())
-        .split(area);
+            Constraint::Length(1),  // Message bar (only shown if there's a message)
+            Constraint::Length(1),  // Command bar
+        ])
+        .split(f.size());
     
-    // Render status bar
-    render_status_bar(f, app, chunks[0]);
-    
-    // Render main content based on current mode
+    // Render the appropriate screen based on the current mode
     match app.mode {
         AppMode::Welcome => render_welcome(f, app, chunks[1]),
-        AppMode::Configuration => render_configuration(f, app, chunks[1]),
+        AppMode::Configuration => render_config(f, app, chunks[1]),
         AppMode::ApiKeyInput => render_api_key_input(f, app, chunks[1]),
+        AppMode::CustomModelInput => render_custom_model_input(f, app, chunks[1]),
         AppMode::FileBrowser => render_file_browser(f, app, chunks[1]),
         AppMode::FileSelection => render_file_selection(f, app, chunks[1]),
         AppMode::Editor => render_editor(f, app, chunks[1]),
         AppMode::PromptInput => render_prompt_input(f, app, chunks[1]),
         AppMode::Results => render_results(f, app, chunks[1]),
         AppMode::Help => render_help(f, app, chunks[1]),
-        AppMode::Credits => render_credits_screen(f, app, chunks[1]),
+        AppMode::Credits => render_credits(f, app, chunks[1]),
     }
     
-    // Render message bar
-    render_message_bar(f, app, chunks[2]);
-    
-    // Show credits popup if enabled (in any mode)
-    if app.show_credits {
-        render_credits(f, app, area);
+    // Render message bar if there's a message
+    if app.message.is_some() {
+        render_message_bar(f, app, "", chunks[2]);
     }
     
-    // Show spinner overlay only if processing and not in prompt input mode
-    // This prevents duplicate spinners when in prompt input mode
-    if app.processing_state == crate::app::ProcessingState::Processing && app.mode != AppMode::PromptInput {
-        render_spinner(f, app, area);
-    }
+    // Render command bar
+    render_command_bar(f, app, chunks[3]);
 }
 
-/// Renders the welcome screen
-fn render_welcome(f: &mut Frame, _app: &App, area: Rect) {
-    let area = f.size();
+/// Render the welcome screen
+pub fn render_welcome(f: &mut Frame, _app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(" Welcome ");
     
-    // Create a centered area for the welcome message
-    let welcome_area = centered_rect(60, 20, area);
+    let inner_area = block.inner(area);
     
-    // Create the welcome message
     let welcome_text = vec![
-        Span::styled(
-            "Code-AI Assistant",
-            Style::default()
-                .fg(HIGHLIGHT_COLOR)
-                .add_modifier(Modifier::BOLD)
-        ),
-        Span::raw("\n\n"),
-        Span::styled(
-            "An AI-powered code editing assistant",
-            Style::default().fg(SECONDARY_COLOR)
-        ),
-        Span::raw("\n\n"),
-        Span::raw("Press "),
-        Span::styled("ENTER", Style::default().fg(ACCENT_COLOR)),
-        Span::raw(" to start"),
-        Span::raw("\nPress "),
-        Span::styled("q", Style::default().fg(ACCENT_COLOR)),
-        Span::raw(" to quit"),
+        Line::from(vec![
+            Span::styled("Welcome", Style::default().fg(Color::Blue)),
+        ]),
+        Line::from(vec![
+            Span::styled("Code-AI Assistant", Style::default().fg(Color::Magenta)),
+            Span::raw(" - "),
+            Span::raw("An AI-powered code editing assistant"),
+        ]),
+        Line::from(vec![
+            Span::styled("Press ", Style::default()),
+            Span::styled("ENTER", Style::default().fg(Color::Magenta)),
+            Span::raw(" to start"),
+        ]),
+        Line::from(vec![
+            Span::styled("Press ", Style::default()),
+            Span::styled("q", Style::default().fg(Color::Magenta)),
+            Span::raw(" to quit"),
+        ]),
     ];
     
-    // Convert Vec<Span> to Text using Line
-    let text = Text::from(Line::from(welcome_text));
-    
-    let welcome_paragraph = Paragraph::new(text)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(PRIMARY_COLOR))
-            .title("Welcome")
-            .title_style(Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)))
-        .style(Style::default().bg(BG_COLOR))
-        .alignment(ratatui::layout::Alignment::Center)
+    let welcome_paragraph = Paragraph::new(welcome_text)
+        .block(Block::default())
+        .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     
-    f.render_widget(welcome_paragraph, welcome_area);
+    f.render_widget(block, area);
+    f.render_widget(welcome_paragraph, inner_area);
 }
 
 /// Renders the configuration screen
-fn render_configuration(f: &mut Frame, app: &App, area: Rect) {
-    let area = f.size();
+pub fn render_config(f: &mut Frame, app: &App, _area: Rect) {
+    let size = f.size();
     
-    // Split the screen into sections
+    // Create a block for the configuration screen
+    let block = Block::default()
+        .title("Configuration")
+        .borders(Borders::ALL);
+    
+    // Create a layout for the configuration options
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
         .constraints([
             Constraint::Length(3),  // Title
-            Constraint::Length(3),  // API Key info
-            Constraint::Length(6),  // Model selection
-            Constraint::Min(0),     // Spacer
+            Constraint::Length(3),  // API Key status
+            Constraint::Length(1),  // Spacer
+            Constraint::Length(2),  // Model selection title
+            Constraint::Min(10),    // Model options
             Constraint::Length(3),  // Instructions
-        ].as_ref())
-        .split(area);
+        ])
+        .split(size);
     
-    // Title
-    let title = Paragraph::new("Configuration")
-        .style(Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD))
-        .alignment(ratatui::layout::Alignment::Center);
+    // Render title
+    let title = Paragraph::new("Configure your OpenRouter API key and model")
+        .style(Style::default().fg(Color::Cyan))
+        .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
     
-    // API Key section
-    let api_status = match &app.api_key {
-        Some(_) => "API Key: ✓ Configured",
-        None => "API Key: ✗ Not Configured (Press Ctrl+A to add)",
+    // Render API key status
+    let api_key_status = match &app.api_key {
+        Some(_) => "API Key: Configured ✓",
+        None => "API Key: Not configured ✗",
     };
     
-    let api_key_text = Paragraph::new(api_status)
-        .block(Block::default().borders(Borders::ALL).title("OpenRouter API"))
-        .style(Style::default().fg(if app.api_key.is_some() { SUCCESS_COLOR } else { ERROR_COLOR }));
-    f.render_widget(api_key_text, chunks[1]);
+    let api_key_paragraph = Paragraph::new(api_key_status)
+        .style(
+            Style::default().fg(
+                if app.api_key.is_some() {
+                    Color::Green
+                } else {
+                    Color::Red
+                }
+            )
+        );
+    f.render_widget(api_key_paragraph, chunks[1]);
     
-    // Model selection
-    let models: Vec<ListItem> = app.available_models
+    // Render model selection title
+    let model_title = Paragraph::new("Select a model:")
+        .style(Style::default().fg(Color::Cyan));
+    f.render_widget(model_title, chunks[3]);
+    
+    // Render model options
+    let model_options: Vec<ListItem> = app.available_models
         .iter()
-        .enumerate()
-        .map(|(i, model)| {
-            let selected = model == &app.selected_model;
-            let style = if selected {
-                Style::default().fg(HIGHLIGHT_COLOR).add_modifier(Modifier::BOLD)
+        .map(|model| {
+            let content = if model == "custom" {
+                if !app.custom_model.is_empty() {
+                    format!("Custom: {}", app.custom_model)
+                } else {
+                    "Custom model (press Ctrl+C to configure)".to_string()
+                }
             } else {
-                Style::default().fg(Color::White)
+                model.clone()
             };
             
-            ListItem::new(Line::from(Span::styled(
-                format!("{}. {}", i + 1, model),
-                style,
-            )))
+            let style = if model == &app.selected_model {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            ListItem::new(content).style(style)
         })
         .collect();
     
-    let models_list = List::new(models)
-        .block(Block::default().borders(Borders::ALL).title("Available Models"))
-        .highlight_style(Style::default().fg(HIGHLIGHT_COLOR).add_modifier(Modifier::BOLD));
-    f.render_widget(models_list, chunks[2]);
+    let model_list = List::new(model_options)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
     
-    // Instructions
-    let instructions = Paragraph::new("Press [Ctrl+A] to add API key | [Enter] to confirm | [↑/↓] to select model | [Q] to go back")
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(SECONDARY_COLOR));
-    f.render_widget(instructions, chunks[4]);
+    f.render_widget(model_list, chunks[4]);
+    
+    // Render instructions
+    let instructions = Paragraph::new(
+        "Press Enter to continue | Ctrl+A to set API key | Up/Down to select model | Ctrl+C to set custom model"
+    )
+    .style(Style::default().fg(Color::Gray))
+    .alignment(Alignment::Center);
+    f.render_widget(instructions, chunks[5]);
+    
+    // Render the main block
+    f.render_widget(block, size);
 }
 
 /// Renders the API key input screen
-fn render_api_key_input(f: &mut Frame, app: &App, area: Rect) {
+fn render_api_key_input(f: &mut Frame, app: &App, _area: Rect) {
     let area = f.size();
     
     // Create a centered area for the API key input
@@ -228,7 +239,7 @@ fn render_api_key_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Renders the file browser
-fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
+fn render_file_browser(f: &mut Frame, app: &App, _area: Rect) {
     let area = f.size();
     
     // Split the screen into sections
@@ -342,7 +353,7 @@ fn render_file_browser(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Renders the file selection screen
-fn render_file_selection(f: &mut Frame, app: &App, area: Rect) {
+fn render_file_selection(f: &mut Frame, app: &App, _area: Rect) {
     let area = f.size();
     
     // Split the screen into sections
@@ -448,8 +459,6 @@ fn render_file_selection(f: &mut Frame, app: &App, area: Rect) {
 
 /// Renders the code editor
 fn render_editor(f: &mut Frame, app: &App, area: Rect) {
-    let area = f.size();
-    
     // Split the screen into sections
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -458,7 +467,6 @@ fn render_editor(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(3),  // File info
             Constraint::Min(1),     // Code viewer and sidebar
             Constraint::Length(3),  // Status bar
-            Constraint::Length(if app.show_credits { 3 } else { 1 }),  // Message bar or credits info
         ].as_ref())
         .split(area);
     
@@ -502,8 +510,7 @@ fn render_editor(f: &mut Frame, app: &App, area: Rect) {
     }
     
     let code_paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Code"))
-        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL))
         .scroll((app.scroll_position as u16, 0));
     
     f.render_widget(code_paragraph, content_chunks[0]);
@@ -525,12 +532,8 @@ fn render_editor(f: &mut Frame, app: &App, area: Rect) {
     
     f.render_widget(status_bar, main_chunks[2]);
     
-    // Message bar or credits info
-    if app.show_credits {
-        render_credits(f, app, main_chunks[3]);
-    } else {
-        render_message_bar(f, app, main_chunks[3]);
-    }
+    // Credits info is now handled by the main render function
+    // We don't need to render message bar here as it's handled by the main render function
 }
 
 /// Render the sidebar with model info and selected files
@@ -575,22 +578,23 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the message bar
-fn render_message_bar(f: &mut Frame, app: &App, area: Rect) {
-    let message_style = match app.message_type {
-        MessageType::Info => Style::default().fg(SECONDARY_COLOR),
-        MessageType::Error => Style::default().fg(ERROR_COLOR),
-        MessageType::Success => Style::default().fg(SUCCESS_COLOR),
+fn render_message_bar(f: &mut Frame, app: &App, message: &str, area: Rect) {
+    let style = match app.message_type {
+        MessageType::Info => Style::default().fg(Color::Blue),
+        MessageType::Error => Style::default().fg(Color::Red),
+        MessageType::Success => Style::default().fg(Color::Green),
     };
     
-    let message_text = app.message.clone().unwrap_or_default();
-    let message_bar = Paragraph::new(message_text)
-        .style(message_style);
+    // Create a paragraph with the message
+    let message_paragraph = Paragraph::new(message.to_string())
+        .style(style)
+        .wrap(Wrap { trim: true });
     
-    f.render_widget(message_bar, area);
+    f.render_widget(message_paragraph, area);
 }
 
 /// Render credits information
-fn render_credits(f: &mut Frame, app: &App, area: Rect) {
+fn render_credits(f: &mut Frame, app: &App, _area: Rect) {
     if app.show_credits {
         if let Some(credits_info) = &app.credits_info {
             // Format the credits information
@@ -673,117 +677,193 @@ fn format_system_time(time: std::time::SystemTime) -> String {
     }
 }
 
-/// Renders the prompt input screen
-fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
-    let area = f.size();
+/// Render the prompt input screen
+pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue))
+        .title(" Prompt Input ");
     
-    // Split the screen into sections
+    let inner_area = block.inner(area);
+    
+    // Split the area into sections
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
-            Constraint::Length(3),  // Title
-            Constraint::Min(10),    // Prompt input area
-            Constraint::Length(3),  // Instructions
-        ].as_ref())
-        .split(area);
+            Constraint::Min(3),      // Prompt input area
+            Constraint::Length(3),   // Instructions
+        ])
+        .split(inner_area);
     
-    // Title
-    let title_text = if !app.selected_files.is_empty() {
-        format!("Enter Prompt (Using {} files as context)", app.selected_files.len())
-    } else if let Some(file) = &app.current_file {
-        format!("Enter Prompt for {}", file.file_name().unwrap_or_default().to_string_lossy())
-    } else {
-        "Enter Prompt".to_string()
-    };
-    
-    let title = Paragraph::new(title_text)
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(PRIMARY_COLOR));
-    f.render_widget(title, chunks[0]);
-    
-    // Prompt input area
-    let prompt_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Prompt")
-        .style(Style::default());
-    
-    // If processing, show a cooking animation in the prompt area
-    if app.processing_state == crate::app::ProcessingState::Processing {
-        let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let frame_idx = app.spinner_frame % spinner_frames.len();
+    // Determine if we're processing or waiting for input
+    if app.processing_state == ProcessingState::Processing {
+        // Show a "cooking" animation when processing
+        let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spinner = spinner_chars[app.spinner_frame % spinner_chars.len()];
         
+        // Select just one cooking message based on spinner frame
         let cooking_messages = [
+            "Thinking...",
+            "Processing your request...",
+            "Analyzing code...",
+            "Generating response...",
             "Cooking up some code...",
-            "Stirring the algorithm pot...",
-            "Adding a pinch of logic...",
-            "Simmering the solution...",
-            "Whisking some functions...",
-            "Baking the perfect code...",
-            "Sprinkling syntax sugar...",
-            "Marinating the modules...",
-            "Sautéing the subroutines...",
-            "Preparing a delicious patch...",
+            "Brewing a solution...",
+            "Crunching algorithms...",
+            "Consulting the AI oracle...",
         ];
-        let message_idx = (app.spinner_frame / 5) % cooking_messages.len();
         
-        let spinner_text = format!("{} {}", spinner_frames[frame_idx], cooking_messages[message_idx]);
+        // Use a slower rotation for messages - only change every 10 frames
+        let message_index = (app.spinner_frame / 10) % cooking_messages.len();
+        let cooking_message = cooking_messages[message_index];
         
-        let spinner_paragraph = Paragraph::new(spinner_text)
-            .block(prompt_block)
-            .style(Style::default().fg(ACCENT_COLOR))
-            .alignment(ratatui::layout::Alignment::Center);
+        let text = vec![
+            Line::from(vec![
+                Span::raw(""),
+            ]),
+            Line::from(vec![
+                Span::styled(format!(" {} {} ", spinner, cooking_message), 
+                             Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::raw(""),
+            ]),
+        ];
         
-        f.render_widget(spinner_paragraph, chunks[1]);
-    } else {
-        // Normal prompt input display
-        let prompt_paragraph = Paragraph::new(app.current_prompt.as_str())
-            .block(prompt_block)
-            .style(Style::default().fg(Color::White))
+        let paragraph = Paragraph::new(text)
+            .block(Block::default())
+            .alignment(Alignment::Center)
             .wrap(Wrap { trim: true });
         
-        f.render_widget(prompt_paragraph, chunks[1]);
-    }
-    
-    // Instructions
-    let instructions = if app.processing_state == crate::app::ProcessingState::Processing {
-        "Processing your request... Please wait."
-    } else {
-        "[Enter] Submit | [Esc/q] Cancel"
-    };
-    
-    let instructions_paragraph = Paragraph::new(instructions)
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(SECONDARY_COLOR));
-    
-    f.render_widget(instructions_paragraph, chunks[2]);
-    
-    // If there are selected files, show them in a sidebar
-    if !app.selected_files.is_empty() {
-        let sidebar_width = 30.min(area.width / 3);
+        f.render_widget(paragraph, chunks[0]);
         
-        let sidebar_area = Rect {
-            x: area.width - sidebar_width - 1,
-            y: 1,
-            width: sidebar_width,
-            height: area.height - 2,
+        // Instructions for processing state
+        let instructions = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Please wait while your request is being processed...", 
+                             Style::default().fg(Color::Gray)),
+            ]),
+        ])
+        .alignment(Alignment::Center);
+        
+        f.render_widget(instructions, chunks[1]);
+    } else {
+        // Regular prompt input
+        let prompt_text = app.current_prompt.as_str();
+        
+        let paragraph = Paragraph::new(prompt_text)
+            .block(Block::default())
+            .wrap(Wrap { trim: true });
+        
+        f.render_widget(paragraph, chunks[0]);
+        
+        // Calculate cursor position
+        if app.mode == AppMode::PromptInput {
+            // Count lines and characters to determine cursor position
+            let lines: Vec<&str> = prompt_text.split('\n').collect();
+            let line_count = lines.len();
+            
+            if line_count > 0 {
+                let last_line = lines[line_count - 1];
+                let last_line_width = last_line.len() as u16;
+                
+                // Calculate cursor position within the visible area
+                let x = last_line_width.min(chunks[0].width.saturating_sub(1));
+                let y = (line_count as u16 - 1).min(chunks[0].height.saturating_sub(1));
+                
+                // Set cursor position
+                f.set_cursor(
+                    chunks[0].x + x,
+                    chunks[0].y + y
+                );
+            } else {
+                // Default cursor position at the beginning
+                f.set_cursor(chunks[0].x, chunks[0].y);
+            }
+        }
+        
+        // Instructions
+        let instructions = if !app.selected_files.is_empty() {
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("Enter your prompt with context from selected files. ", 
+                                Style::default().fg(Color::Gray)),
+                    Span::styled("Press Enter to submit, Esc to cancel", 
+                                Style::default().fg(Color::Yellow)),
+                ]),
+            ])
+        } else {
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("Enter your prompt for the current file. ", 
+                                Style::default().fg(Color::Gray)),
+                    Span::styled("Press Enter to submit, Esc to cancel", 
+                                Style::default().fg(Color::Yellow)),
+                ]),
+            ])
         };
         
-        render_sidebar(f, app, sidebar_area);
+        f.render_widget(instructions, chunks[1]);
     }
+    
+    // Render the outer block last
+    f.render_widget(block, area);
+}
+
+/// Render a spinner overlay
+pub fn render_spinner_overlay(f: &mut Frame, app: &App, area: Rect) {
+    // Only show the spinner overlay if we're not in prompt input mode
+    // (since prompt input has its own spinner)
+    if app.mode == AppMode::PromptInput {
+        return;
+    }
+    
+    let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = spinner_chars[app.spinner_frame % spinner_chars.len()];
+    
+    let processing_messages = [
+        "Processing...",
+        "Working on it...",
+        "Thinking...",
+        "Analyzing...",
+        "Computing...",
+        "Generating...",
+    ];
+    
+    let message = processing_messages[app.spinner_frame % processing_messages.len()];
+    
+    // Create a centered box for the spinner
+    let width = 40;
+    let height = 3;
+    let spinner_area = Rect::new(
+        (area.width.saturating_sub(width)) / 2,
+        (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    
+    let spinner_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
+    
+    let spinner_text = Paragraph::new(format!("{} {}", spinner, message))
+        .block(spinner_block)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
+    
+    f.render_widget(Clear, spinner_area); // Clear the area first
+    f.render_widget(spinner_text, spinner_area);
 }
 
 /// Renders the results screen with diff
 fn render_results(f: &mut Frame, app: &App, area: Rect) {
-    let area = f.size();
-    
     // Split the screen into sections
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Title
-            Constraint::Min(1),     // Diff panels
-            Constraint::Length(3),  // Instructions
+            Constraint::Min(1),     // Diff panels or explanation
         ].as_ref())
         .margin(1)
         .split(area);
@@ -813,46 +893,69 @@ fn render_results(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(PRIMARY_COLOR));
     f.render_widget(title, main_chunks[0]);
     
-    // Split the main area into two panels
-    let diff_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ].as_ref())
-        .split(main_chunks[1]);
-    
-    if let Some(diff) = &app.current_diff {
-        // Original code panel
-        render_original_panel(f, app, diff, diff_chunks[0]);
-        
-        // Modified code panel
-        render_modified_panel(f, app, diff, diff_chunks[1]);
+    // Check if we should show explanation text
+    if app.show_explanation && app.explanation_text.is_some() {
+        render_explanation_panel(f, app, main_chunks[1]);
     } else {
-        // If no diff is available, show a message
-        let no_diff_text = Paragraph::new("No changes to display")
-            .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().fg(Color::Red))
-            .alignment(ratatui::layout::Alignment::Center);
+        // Split the main area into two panels for code diff
+        let diff_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ].as_ref())
+            .split(main_chunks[1]);
         
-        f.render_widget(no_diff_text, main_chunks[1]);
-    }
-    
-    // Instructions - add navigation instructions for multi-file diffs
-    let instructions = if let Some(diffs) = &app.multi_file_diffs {
-        if diffs.len() > 1 {
-            "[Y] Apply all changes | [N] Discard | [←/→] Navigate files | [Tab] Switch panels | [↑/↓] Scroll"
+        if let Some(diff) = &app.current_diff {
+            // Original code panel
+            render_original_panel(f, app, diff, diff_chunks[0]);
+            
+            // Modified code panel
+            render_modified_panel(f, app, diff, diff_chunks[1]);
         } else {
-            "[Y] Apply changes | [N] Discard | [Tab] Switch panels | [↑/↓] Scroll"
+            // If no diff is available, show a message
+            let no_diff_text = Paragraph::new("No changes to display")
+                .block(Block::default().borders(Borders::ALL))
+                .style(Style::default().fg(Color::Red))
+                .alignment(Alignment::Center);
+            
+            f.render_widget(no_diff_text, main_chunks[1]);
         }
+    }
+}
+
+/// Renders the explanation panel
+fn render_explanation_panel(f: &mut Frame, app: &App, area: Rect) {
+    if let Some(explanation) = &app.explanation_text {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(PRIMARY_COLOR))
+            .title("AI Explanation");
+        
+        let inner_area = block.inner(area);
+        
+        // Format the explanation text
+        let mut formatted_text = Vec::new();
+        for line in explanation.lines() {
+            formatted_text.push(Line::from(line));
+        }
+        
+        let explanation_paragraph = Paragraph::new(formatted_text)
+            .block(Block::default())
+            .wrap(Wrap { trim: true })
+            .scroll((app.scroll_position as u16, 0));
+        
+        f.render_widget(block, area);
+        f.render_widget(explanation_paragraph, inner_area);
     } else {
-        "[Y] Apply changes | [N] Discard | [Tab] Switch panels | [↑/↓] Scroll"
-    };
-    
-    let instructions_paragraph = Paragraph::new(instructions)
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(SECONDARY_COLOR));
-    f.render_widget(instructions_paragraph, main_chunks[2]);
+        // If no explanation is available, show a message
+        let no_explanation_text = Paragraph::new("No explanation available for this change")
+            .block(Block::default().borders(Borders::ALL).title("AI Explanation"))
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center);
+        
+        f.render_widget(no_explanation_text, area);
+    }
 }
 
 /// Renders the original code panel
@@ -969,7 +1072,7 @@ fn render_modified_panel(
 }
 
 /// Renders the help screen
-fn render_help(f: &mut Frame, _app: &App, area: Rect) {
+fn render_help(f: &mut Frame, _app: &App, _area: Rect) {
     let area = f.size();
     
     // Create a centered area for the help content
@@ -1010,8 +1113,10 @@ fn render_help(f: &mut Frame, _app: &App, area: Rect) {
         Line::from(vec![Span::styled("Results View:", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD))]),
         Line::from("  [Y] - Apply changes"),
         Line::from("  [N] - Discard changes"),
-        Line::from("  [Tab] - Switch between original and modified code"),
-        Line::from("  [↑/↓] - Scroll through code"),
+        Line::from("  [E] - Toggle between explanation text and code diff"),
+        Line::from("  [Tab] - Switch between original and modified code (when viewing diff)"),
+        Line::from("  [↑/↓] - Scroll through code or explanation"),
+        Line::from("  [←/→] - Navigate between files (for multi-file changes)"),
         Line::from(""),
         Line::from(vec![Span::styled("Multi-File Context:", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD))]),
         Line::from("  Use [S] in editor mode to select files for context"),
@@ -1023,8 +1128,8 @@ fn render_help(f: &mut Frame, _app: &App, area: Rect) {
         .block(Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(PRIMARY_COLOR))
-            .title("Help")
-            .title_style(Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)))
+        .title("Help")
+        .title_style(Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)))
         .style(Style::default())
         .wrap(Wrap { trim: true });
     
@@ -1215,4 +1320,83 @@ fn render_credits_screen(f: &mut Frame, app: &App, area: Rect) {
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(SECONDARY_COLOR));
     f.render_widget(instructions, chunks[2]);
+}
+
+/// Render the command bar
+fn render_command_bar(f: &mut Frame, app: &App, area: Rect) {
+    let command_text = match app.mode {
+        AppMode::Welcome => "Enter: Continue | q: Quit",
+        AppMode::Configuration => "Enter: Continue | Ctrl+A: Set API Key | Ctrl+C: Set Custom Model | q: Back",
+        AppMode::ApiKeyInput => "Enter: Save API Key | Esc: Cancel",
+        AppMode::CustomModelInput => "Enter: Save Custom Model | Esc: Cancel",
+        AppMode::FileBrowser => "Enter: Open | Backspace/b: Up | s: Select | m: Multi-select | p: Prompt | h: Help | q: Back",
+        AppMode::FileSelection => "Space: Toggle Selection | Enter: Continue | Esc/q: Cancel",
+        AppMode::Editor => "p: Prompt | s: Select for Context | l: List Selected | q: Back",
+        AppMode::PromptInput => "Enter: Submit | Esc: Cancel",
+        AppMode::Results => {
+            if app.multi_file_diffs.is_some() {
+                "y: Apply All Changes | n: Discard | Left/Right: Navigate Files | e: Toggle Explanation | q: Back"
+            } else {
+                "y: Apply Changes | n: Discard | e: Toggle Explanation | q: Back"
+            }
+        },
+        AppMode::Help => "q: Back",
+        AppMode::Credits => "r: Refresh | q: Back",
+    };
+    
+    let command_bar = Paragraph::new(command_text)
+        .style(Style::default().fg(Color::White).bg(Color::Blue))
+        .alignment(Alignment::Center);
+    
+    f.render_widget(command_bar, area);
+}
+
+/// Render the custom model input screen
+pub fn render_custom_model_input(f: &mut Frame, app: &App, _area: Rect) {
+    let size = f.size();
+    
+    // Create a block for the custom model input screen
+    let block = Block::default()
+        .title("Custom Model Input")
+        .borders(Borders::ALL);
+    
+    // Create a layout for the input area
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(3),  // Title
+            Constraint::Length(3),  // Input field
+            Constraint::Length(3),  // Instructions
+        ])
+        .split(size);
+    
+    // Render title
+    let title = Paragraph::new("Enter your custom model identifier")
+        .style(Style::default().fg(Color::Cyan))
+        .alignment(Alignment::Center);
+    f.render_widget(title, chunks[0]);
+    
+    // Render input field
+    let input = Paragraph::new(app.current_prompt.as_str())
+        .style(Style::default())
+        .block(Block::default().borders(Borders::ALL).title("Custom Model"));
+    f.render_widget(input, chunks[1]);
+    
+    // Set cursor position
+    f.set_cursor(
+        chunks[1].x + app.current_prompt.len() as u16 + 1,
+        chunks[1].y + 1,
+    );
+    
+    // Render instructions
+    let instructions = Paragraph::new(
+        "Enter a model identifier like 'google/gemini-2.0-flash-lite-001' | Press Enter to save | Esc to cancel"
+    )
+    .style(Style::default().fg(Color::Gray))
+    .alignment(Alignment::Center);
+    f.render_widget(instructions, chunks[2]);
+    
+    // Render the main block
+    f.render_widget(block, size);
 } 

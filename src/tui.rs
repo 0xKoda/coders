@@ -106,7 +106,7 @@ pub fn run_event_loop(
             }
         }
         
-        // Render the UI - no need to specify generic parameter
+        // Render the UI
         terminal.draw(|f| ui::render(f, app))?;
         
         // Check for prompt results
@@ -154,8 +154,8 @@ pub fn run_event_loop(
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
             
-            // Update spinner animation
-            app.update_spinner();
+            // Update app state (spinner animation and message timeout)
+            app.update();
         }
     }
     

@@ -53,6 +53,7 @@ pub fn smart_merge(original: &str, new: &str) -> FileDiff {
         original: original.to_string(),
         modified: updated_lines.join("\n"),
         changes,
+        explanation_text: None,
     }
 }
 
@@ -92,6 +93,7 @@ fn full_file_diff(original_lines: &[&str], new_lines: &[&str]) -> FileDiff {
         original: original_lines.join("\n"),
         modified: new_lines.join("\n"),
         changes,
+        explanation_text: None,
     }
 }
 
@@ -130,4 +132,110 @@ pub fn list_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     });
     
     Ok(entries)
+}
+
+/// Calculate diff between original and modified code
+pub fn calculate_diff(original: &str, modified: &str) -> Vec<crate::app::Change> {
+    let mut changes = Vec::new();
+    
+    // Split the original and modified code into lines
+    let original_lines: Vec<&str> = original.lines().collect();
+    let modified_lines: Vec<&str> = modified.lines().collect();
+    
+    // Use a simple line-by-line comparison for now
+    // This is a basic implementation and could be improved with a proper diff algorithm
+    let max_lines = std::cmp::max(original_lines.len(), modified_lines.len());
+    
+    for i in 0..max_lines {
+        let original_line = original_lines.get(i).map(|s| *s).unwrap_or("");
+        let modified_line = modified_lines.get(i).map(|s| *s).unwrap_or("");
+        
+        if i >= original_lines.len() {
+            // Line was added
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Insert,
+                line_number: i,
+                content: modified_line.to_string(),
+            });
+        } else if i >= modified_lines.len() {
+            // Line was deleted
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Delete,
+                line_number: i,
+                content: original_line.to_string(),
+            });
+        } else if original_line != modified_line {
+            // Line was modified
+            changes.push(crate::app::Change {
+                change_type: crate::app::ChangeType::Modify,
+                line_number: i,
+                content: modified_line.to_string(),
+            });
+        }
+    }
+    
+    changes
+}
+
+/// Apply a patch to a file
+pub fn apply_patch(file_path: &std::path::Path, patch: &str) -> anyhow::Result<()> {
+    // Read the original file content
+    let original_content = std::fs::read_to_string(file_path)?;
+    
+    // Apply the patch to get the modified content
+    let modified_content = apply_patch_to_string(&original_content, patch)?;
+    
+    // Write the modified content back to the file
+    std::fs::write(file_path, modified_content)?;
+    
+    Ok(())
+}
+
+/// Apply a patch to a string
+pub fn apply_patch_to_string(original: &str, patch: &str) -> anyhow::Result<String> {
+    // Parse the patch
+    let diff = parse_diff(patch)?;
+    
+    // Apply the diff to the original content
+    let modified = apply_diff(original, &diff)?;
+    
+    Ok(modified)
+}
+
+/// Parse a diff string into a FileDiff struct
+pub fn parse_diff(diff_str: &str) -> anyhow::Result<crate::app::FileDiff> {
+    // For now, we'll just return a simple diff that replaces the entire file
+    // In a real implementation, this would parse the diff format
+    
+    Ok(FileDiff {
+        original: String::new(),
+        modified: diff_str.to_string(),
+        changes: Vec::new(),
+        explanation_text: None,
+    })
+}
+
+/// Apply a diff to a string
+pub fn apply_diff(_original: &str, diff: &crate::app::FileDiff) -> anyhow::Result<String> {
+    // For now, we'll just return the modified content from the diff
+    // In a real implementation, this would apply the changes in the diff
+    
+    Ok(diff.modified.clone())
+}
+
+/// Create a diff between two files
+pub fn create_diff(original_path: &std::path::Path, modified_path: &std::path::Path) -> anyhow::Result<crate::app::FileDiff> {
+    // Read the original and modified file content
+    let original = std::fs::read_to_string(original_path)?;
+    let modified = std::fs::read_to_string(modified_path)?;
+    
+    // Calculate the diff
+    let changes = calculate_diff(&original, &modified);
+    
+    Ok(FileDiff {
+        original,
+        modified,
+        changes,
+        explanation_text: None,
+    })
 } 

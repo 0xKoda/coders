@@ -1,7 +1,7 @@
 use anyhow::Result;
-use log;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use std::time::Duration;
 
 /// Represents different views/modes in the application
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +9,7 @@ pub enum AppMode {
     Welcome,          // Initial welcome screen
     Configuration,    // Setting up API key/model
     ApiKeyInput,      // Input screen for API key
+    CustomModelInput, // Input screen for custom model
     FileBrowser,      // Browsing files
     FileSelection,    // Selecting multiple files for context
     Editor,           // Viewing/editing code
@@ -40,6 +41,7 @@ pub struct FileDiff {
     pub original: String,
     pub modified: String,
     pub changes: Vec<Change>,
+    pub explanation_text: Option<String>,
 }
 
 /// Represents a single change in a file
@@ -86,6 +88,7 @@ pub struct App {
     pub api_key: Option<String>,
     pub selected_model: String,
     pub available_models: Vec<String>,
+    pub custom_model: String,
     
     // File browsing
     pub current_dir: PathBuf,
@@ -108,6 +111,7 @@ pub struct App {
     pub current_diff: Option<FileDiff>,
     pub current_diff_file: Option<String>,  // Name of the file currently being viewed
     pub multi_file_diffs: Option<Vec<(String, FileDiff)>>,  // All diffs from a multi-file response
+    pub explanation_text: Option<String>,   // Store the explanatory text from the LLM for the entire response
     
     // Processing state
     pub processing_state: ProcessingState,
@@ -122,6 +126,13 @@ pub struct App {
     
     /// Whether to show credits information
     pub show_credits: bool,
+    
+    /// Message timeout (for auto-clearing messages)
+    pub message_time: Option<std::time::Instant>,
+    pub message_timeout: std::time::Duration,
+    
+    /// Whether to show explanation text in results view
+    pub show_explanation: bool,
 }
 
 /// Message type for status updates
@@ -142,35 +153,44 @@ impl Default for App {
             api_key: None,
             selected_model: "anthropic/claude-3.7-sonnet:beta".to_string(),
             available_models: vec![
-                "anthropic/claude-3.7-sonnet:beta".to_string(),
                 "google/gemini-2.0-flash-001".to_string(),
+                "anthropic/claude-3.7-sonnet".to_string(),
+                "custom".to_string(),  // Option for custom model input
             ],
+            custom_model: String::new(),
             
-            current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             file_list: Vec::new(),
             selected_file_idx: 0,
+            
+            selected_files: Vec::new(),
+            selected_files_content: Vec::new(),
             
             current_file: None,
             current_file_content: String::new(),
             scroll_position: 0,
-            
-            selected_files: Vec::new(),
-            selected_files_content: Vec::new(),
             
             current_prompt: String::new(),
             
             current_diff: None,
             current_diff_file: None,
             multi_file_diffs: None,
+            explanation_text: None,
             
             processing_state: ProcessingState::Idle,
             spinner_frame: 0,
             
-            message: None, 
+            message: None,
             message_type: MessageType::Info,
             
             credits_info: None,
+            
             show_credits: false,
+            
+            message_time: None,
+            message_timeout: Duration::from_secs(3),
+            
+            show_explanation: true,
         }
     }
 }
@@ -187,11 +207,12 @@ impl App {
             AppMode::Welcome => self.handle_welcome_key(key),
             AppMode::Configuration => self.handle_config_key(key),
             AppMode::ApiKeyInput => self.handle_api_key_input_key(key),
+            AppMode::CustomModelInput => self.handle_custom_model_input_key(key),
             AppMode::FileBrowser => self.handle_file_browser_key(key),
             AppMode::FileSelection => self.handle_file_selection_key(key),
             AppMode::Editor => self.handle_editor_key(key),
             AppMode::PromptInput => {
-                // Use the multi-file context handler if files are selected
+                // Check if we have selected files for context
                 if !self.selected_files.is_empty() {
                     self.handle_prompt_key_with_context(key)
                 } else {
@@ -229,6 +250,11 @@ impl App {
                 self.mode = AppMode::Welcome;
             }
             KeyCode::Enter => {
+                // If selected model is "custom", check if custom model is provided
+                if self.selected_model == "custom" && !self.custom_model.is_empty() {
+                    self.selected_model = self.custom_model.clone();
+                }
+                
                 // If API key is configured, proceed to file browser
                 if self.api_key.is_some() {
                     // Save the selected model and API key to config
@@ -265,6 +291,13 @@ impl App {
                     if idx < self.available_models.len() - 1 {
                         self.selected_model = self.available_models[idx + 1].clone();
                     }
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+C to enter custom model input
+                if self.selected_model == "custom" {
+                    self.current_prompt = self.custom_model.clone();
+                    self.mode = AppMode::CustomModelInput;
                 }
             }
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -682,36 +715,58 @@ impl App {
     pub fn handle_prompt_result(&mut self, result: crate::tui::PromptResult) {
         match result {
             crate::tui::PromptResult::Success(diff) => {
-                // Update the diff and switch to results mode
+                // Store the explanation text at the app level
+                self.explanation_text = diff.explanation_text.clone();
+                
+                // Set the current diff
                 self.current_diff = Some(diff);
-                self.processing_state = ProcessingState::Done;
+                
+                // Set the current diff file name
+                if let Some(path) = &self.current_file {
+                    if let Some(file_name) = path.file_name() {
+                        self.current_diff_file = Some(file_name.to_string_lossy().to_string());
+                    }
+                }
+                
+                // Clear multi-file diffs
+                self.multi_file_diffs = None;
+                
+                // Switch to results mode
                 self.mode = AppMode::Results;
-                self.scroll_position = 0;
-                self.current_prompt = String::new();
+                
+                // Set processing state to done
+                self.processing_state = ProcessingState::Done;
+                
+                // Set success message
+                self.set_success_message("Code changes generated successfully");
             }
             crate::tui::PromptResult::MultiFileSuccess(diffs) => {
-                // Handle multiple file diffs
                 if !diffs.is_empty() {
-                    // Store all diffs for later application
-                    self.multi_file_diffs = Some(diffs.clone());
-                    
-                    // Set the first diff as the current one to display
-                    if let Some((file_path, diff)) = diffs.first() {
-                        self.current_diff = Some(diff.clone());
-                        self.current_diff_file = Some(file_path.clone());
-                        self.processing_state = ProcessingState::Done;
-                        self.mode = AppMode::Results;
-                        self.scroll_position = 0;
-                        self.current_prompt = String::new();
-                        
-                        // Set a message indicating multiple files were modified
-                        if diffs.len() > 1 {
-                            self.set_info_message(&format!("Changes for {} files. Reviewing first file.", diffs.len()));
-                        }
+                    // Store the explanation text at the app level (use the first diff's explanation)
+                    if let Some((_, first_diff)) = diffs.first() {
+                        self.explanation_text = first_diff.explanation_text.clone();
                     }
+                    
+                    // Set the first diff as the current diff
+                    let (first_file, first_diff) = diffs[0].clone();
+                    self.current_diff = Some(first_diff);
+                    self.current_diff_file = Some(first_file);
+                    
+                    // Store all diffs
+                    self.multi_file_diffs = Some(diffs);
+                    
+                    // Switch to results mode
+                    self.mode = AppMode::Results;
+                    
+                    // Set processing state to done
+                    self.processing_state = ProcessingState::Done;
+                    
+                    // Set success message
+                    self.set_success_message("Code changes generated for multiple files");
                 } else {
-                    self.set_error_message("No changes were generated for any files.");
-                    self.processing_state = ProcessingState::Error("No changes were generated".to_string());
+                    // No diffs were generated
+                    self.processing_state = ProcessingState::Error("No code changes were generated".to_string());
+                    self.set_error_message("No code changes were generated");
                 }
             }
             crate::tui::PromptResult::Error(error) => {
@@ -728,10 +783,19 @@ impl App {
         }
     }
     
-    /// Update spinner animation frame
-    pub fn update_spinner(&mut self) {
+    /// Update spinner animation frame and check message timeout
+    pub fn update(&mut self) {
+        // Update spinner animation
         if self.processing_state == ProcessingState::Processing {
             self.spinner_frame = (self.spinner_frame + 1) % 8;
+        }
+        
+        // Check if message should be cleared
+        if let Some(time) = self.message_time {
+            if time.elapsed() >= self.message_timeout && self.message_type == MessageType::Success {
+                self.message = None;
+                self.message_time = None;
+            }
         }
     }
     
@@ -741,96 +805,85 @@ impl App {
         match key.code {
             KeyCode::Char('y') => {
                 // Apply changes
-                if let Some(multi_diffs) = &self.multi_file_diffs {
-                    // If we have multiple file diffs, apply all of them
-                    if multi_diffs.len() > 1 {
-                        if let Err(e) = self.apply_multi_file_changes() {
-                            self.set_error_message(&format!("Error applying changes: {}", e));
-                        }
-                    } else {
-                        // Single file in multi-file format
-                        if let Some(diff) = &self.current_diff {
-                            if let Some(file_name) = &self.current_diff_file {
-                                // Find the file path that matches the file name
-                                for selected_file in &self.selected_files {
-                                    if selected_file.file_name() == Some(std::ffi::OsStr::new(file_name)) {
-                                        if let Err(e) = std::fs::write(selected_file, &diff.modified) {
-                                            self.set_error_message(&format!("Error writing to file: {}", e));
-                                        } else {
-                                            // Update current file content if this is the current file
-                                            if Some(selected_file) == self.current_file.as_ref() {
-                                                self.current_file_content = diff.modified.clone();
-                                            }
-                                            
-                                            // Update selected files content
-                                            if let Some(idx) = self.selected_files_content.iter().position(|(path, _)| path == selected_file) {
-                                                self.selected_files_content[idx].1 = diff.modified.clone();
-                                            }
-                                            
-                                            self.set_success_message(&format!("Changes applied to {}", file_name));
-                                        }
-                                        break;
-                                    }
-                                }
+                if let Some(diff) = &self.current_diff {
+                    if let Some(_file_name) = &self.current_diff_file {
+                        if let Some(_multi_diffs) = &self.multi_file_diffs {
+                            // For multi-file diffs, apply all changes
+                            self.apply_multi_file_changes()?;
+                        } else {
+                            // For single file diff, apply the current diff
+                            if let Some(path) = &self.current_file {
+                                // Write the modified content to the file
+                                std::fs::write(path, &diff.modified)?;
+                                
+                                // Update the content in memory
+                                self.current_file_content = diff.modified.clone();
+                                
+                                self.set_success_message("Changes applied successfully");
                             }
                         }
                     }
-                } else if let Some(diff) = &self.current_diff {
-                    // Regular single file diff
-                    if let Some(path) = &self.current_file {
-                        if let Err(e) = std::fs::write(path, &diff.modified) {
-                            self.set_error_message(&format!("Error writing to file: {}", e));
-                        } else {
-                            self.current_file_content = diff.modified.clone();
-                            self.set_success_message("Changes applied successfully!");
-                        }
-                    }
                 }
                 
-                // Clear multi-file diffs after applying
-                self.multi_file_diffs = None;
-                self.current_diff_file = None;
-                
+                // Return to editor mode
                 self.mode = AppMode::Editor;
+                self.current_diff = None;
+                self.current_diff_file = None;
+                self.multi_file_diffs = None;
+                self.explanation_text = None;
+                self.scroll_position = 0;
             }
             KeyCode::Char('n') => {
                 // Discard changes
-                self.set_info_message("Changes discarded.");
-                self.multi_file_diffs = None;
-                self.current_diff_file = None;
                 self.mode = AppMode::Editor;
-            }
-            KeyCode::Char('j') | KeyCode::Right => {
-                // Next file in multi-file diff
-                if self.next_diff_file() {
-                    // Already handled in the function
-                } else {
-                    self.set_info_message("No more files to review.");
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Left => {
-                // Previous file in multi-file diff
-                if self.prev_diff_file() {
-                    // Already handled in the function
-                } else {
-                    self.set_info_message("This is the first file.");
-                }
+                self.current_diff = None;
+                self.current_diff_file = None;
+                self.multi_file_diffs = None;
+                self.explanation_text = None;
+                self.scroll_position = 0;
+                self.set_info_message("Changes discarded");
             }
             KeyCode::Tab => {
-                // Toggle active panel
+                // Switch between original and modified panels
                 self.active_panel = match self.active_panel {
                     ActivePanel::Left => ActivePanel::Right,
                     ActivePanel::Right => ActivePanel::Left,
                 };
             }
             KeyCode::Up => {
+                // Scroll up
                 if self.scroll_position > 0 {
                     self.scroll_position -= 1;
                 }
             }
             KeyCode::Down => {
-                // This is simplified, would need to check against actual content length
+                // Scroll down
                 self.scroll_position += 1;
+            }
+            KeyCode::Left => {
+                // Previous diff file (if multi-file)
+                if self.multi_file_diffs.is_some() {
+                    self.prev_diff_file();
+                }
+            }
+            KeyCode::Right => {
+                // Next diff file (if multi-file)
+                if self.multi_file_diffs.is_some() {
+                    self.next_diff_file();
+                }
+            }
+            KeyCode::Char('e') => {
+                // Toggle explanation view
+                self.toggle_explanation_view();
+            }
+            KeyCode::Char('q') => {
+                // Return to editor mode
+                self.mode = AppMode::Editor;
+                self.current_diff = None;
+                self.current_diff_file = None;
+                self.multi_file_diffs = None;
+                self.explanation_text = None;
+                self.scroll_position = 0;
             }
             _ => {}
         }
@@ -897,18 +950,21 @@ impl App {
     pub fn set_info_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Info;
+        self.message_time = Some(std::time::Instant::now());
     }
     
     /// Set an error message
     pub fn set_error_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Error;
+        self.message_time = Some(std::time::Instant::now());
     }
     
     /// Set a success message
     pub fn set_success_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Success;
+        self.message_time = Some(std::time::Instant::now());
     }
     
     /// Handle key events for file selection mode
@@ -1140,176 +1196,121 @@ impl App {
         use crossterm::event::KeyCode;
         
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Determine which mode to return to based on whether we're in multi-file mode
-                if !self.selected_files.is_empty() {
-                    self.mode = AppMode::FileSelection;
-                } else {
-                    self.mode = AppMode::Editor;
-                }
-                // Clear the prompt when exiting
-                self.current_prompt = String::new();
-            }
             KeyCode::Enter => {
-                // Don't process empty prompts
-                if self.current_prompt.trim().is_empty() {
-                    self.set_error_message("Prompt cannot be empty");
-                    return Ok(());
-                }
-                
-                // Set processing state
-                self.processing_state = ProcessingState::Processing;
-                
-                if let Some(api_key) = &self.api_key {
-                    // Get the primary file (current file or first selected file)
-                    let primary_file = if let Some(current_file) = &self.current_file {
-                        current_file.clone()
-                    } else if let Some((file_path, _)) = self.selected_files_content.first() {
-                        file_path.clone()
-                    } else {
-                        self.processing_state = ProcessingState::Error("No file selected".to_string());
-                        return Ok(());
-                    };
+                // Submit prompt with context
+                if !self.current_prompt.is_empty() {
+                    // Set processing state
+                    self.processing_state = ProcessingState::Processing;
                     
-                    // Get the primary file content
-                    let primary_content = if let Some(current_file) = &self.current_file {
-                        if primary_file == *current_file {
-                            self.current_file_content.clone()
-                        } else if let Ok(content) = std::fs::read_to_string(&primary_file) {
-                            content
-                        } else {
-                            self.processing_state = ProcessingState::Error("Failed to read primary file".to_string());
+                    // Get the API key
+                    let api_key = match &self.api_key {
+                        Some(key) => key.clone(),
+                        None => {
+                            self.set_error_message("API key not set");
+                            self.processing_state = ProcessingState::Error("API key not set".to_string());
                             return Ok(());
                         }
-                    } else if let Some((_, content)) = self.selected_files_content.first() {
-                        content.clone()
-                    } else {
-                        self.processing_state = ProcessingState::Error("No file content available".to_string());
-                        return Ok(());
                     };
                     
-                    // Create context from all selected files
-                    let mut context = String::new();
-                    for (file_path, content) in &self.selected_files_content {
-                        if file_path != &primary_file {  // Skip the primary file in context
-                            let file_name = file_path.file_name().unwrap_or_default().to_string_lossy();
-                            let language = crate::api::get_file_language(file_path);
-                            context.push_str(&format!("\n\n--- File: {} ({})\n{}\n", file_name, language, content));
-                        }
-                    }
-                    
-                    // Clone values for the async task
-                    let prompt = self.current_prompt.clone();
-                    let api_key = api_key.clone();
+                    // Get the selected model
                     let model = self.selected_model.clone();
-                    let language = crate::api::get_file_language(&primary_file);
-                    let primary_file_name = primary_file.file_name().unwrap_or_default().to_string_lossy().to_string();
                     
-                    // Clone selected files for multi-file processing
+                    // Get the current file content
+                    let current_file_content = self.current_file_content.clone();
+                    
+                    // Get the current file path
+                    let current_file = self.current_file.clone();
+                    
+                    // Get the prompt
+                    let prompt = self.current_prompt.clone();
+                    
+                    // Get the selected files content
                     let selected_files_content = self.selected_files_content.clone();
                     
-                    // Get the current Tokio runtime handle
-                    match tokio::runtime::Handle::try_current() {
-                        Ok(handle) => {
-                            // Spawn a tokio task to process the prompt
-                            let tx = crate::tui::PROMPT_RESULT_TX.lock().unwrap().clone();
-                            
-                            handle.spawn(async move {
-                                // Process the prompt with context
-                                match crate::api::send_code_modification_request_with_context(
-                                    &api_key,
-                                    &prompt,
-                                    &primary_content,
-                                    &context,
-                                    None, // No AST for now
-                                    &model,
-                                    language,
-                                ).await {
-                                    Ok(response) => {
-                                        // Check if the response contains multiple file edits
-                                        if response.contains("```") && (response.contains("File:") || response.contains("file:")) {
-                                            // Process multi-file response
-                                            let file_edits = crate::api::process_multi_file_response(&response);
-                                            
+                    // Get the context from selected files
+                    let context = self.get_selected_files_content();
+                    
+                    // Spawn a new task to handle the API request
+                    let prompt_tx = crate::tui::PROMPT_RESULT_TX.lock().unwrap().clone();
+                    
+                    tokio::spawn(async move {
+                        // Determine the language of the current file
+                        let language = if let Some(ref path) = current_file {
+                            crate::api::get_file_language(path)
+                        } else {
+                            "plaintext"
+                        };
+                        
+                        // Send the request to the API
+                        match crate::api::send_code_modification_request_with_context(
+                            &api_key,
+                            &prompt,
+                            &current_file_content,
+                            &context,
+                            None, // No AST for now
+                            &model,
+                            language,
+                        ).await {
+                            Ok(response) => {
+                                // Check if the response contains multiple file edits
+                                if (response.contains("File:") || response.contains("file:")) && response.contains("```") {
+                                    // Process multi-file response
+                                    match crate::api::process_multi_file_response(
+                                        response.clone(),
+                                        &selected_files_content,
+                                    ).await {
+                                        Ok(file_edits) => {
                                             if !file_edits.is_empty() {
-                                                // Create diffs for each file
-                                                let mut diffs = Vec::new();
-                                                
-                                                // First, handle the primary file if it's in the response
-                                                let mut primary_file_handled = false;
-                                                
-                                                for (file_name, modified_content) in &file_edits {
-                                                    // Check if this is the primary file
-                                                    if file_name == &primary_file_name {
-                                                        let diff = crate::files::smart_merge(&primary_content, modified_content);
-                                                        diffs.push((file_name.clone(), diff));
-                                                        primary_file_handled = true;
-                                                    } else {
-                                                        // Find the original content for this file
-                                                        for (path, original_content) in &selected_files_content {
-                                                            let path_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                                            if &path_name == file_name {
-                                                                let diff = crate::files::smart_merge(original_content, modified_content);
-                                                                diffs.push((file_name.clone(), diff));
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                
-                                                // If the primary file wasn't in the response but was modified
-                                                if !primary_file_handled {
-                                                    // Extract code for the primary file
-                                                    let extracted_code = crate::api::extract_code_from_response(&response);
-                                                    if !extracted_code.is_empty() {
-                                                        let diff = crate::files::smart_merge(&primary_content, &extracted_code);
-                                                        diffs.push((primary_file_name, diff));
-                                                    }
-                                                }
-                                                
-                                                // Send the multi-file result
-                                                let _ = tx.send(crate::tui::PromptResult::MultiFileSuccess(diffs));
-                                            } else {
-                                                // Fallback to single file if no files were extracted
-                                                let extracted_code = crate::api::extract_code_from_response(&response);
-                                                let modified_code = if extracted_code.is_empty() { response } else { extracted_code };
-                                                let diff = crate::files::smart_merge(&primary_content, &modified_code);
-                                                let _ = tx.send(crate::tui::PromptResult::Success(diff));
+                                                // Send the multi-file diffs back to the main thread
+                                                let _ = prompt_tx.send(crate::tui::PromptResult::MultiFileSuccess(file_edits));
+                                                return;
                                             }
-                                        } else {
-                                            // Regular single file processing
-                                            let extracted_code = crate::api::extract_code_from_response(&response);
-                                            let modified_code = if extracted_code.is_empty() { response } else { extracted_code };
-                                            let diff = crate::files::smart_merge(&primary_content, &modified_code);
-                                            let _ = tx.send(crate::tui::PromptResult::Success(diff));
+                                        }
+                                        Err(e) => {
+                                            // If multi-file processing fails, fall back to single file
+                                            log::error!("Failed to process multi-file response: {}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        // Send an error message
-                                        let _ = tx.send(crate::tui::PromptResult::Error(e.to_string()));
-                                    }
                                 }
-                            });
-                        }
-                        Err(_) => {
-                            self.processing_state = ProcessingState::Error("No Tokio runtime available".to_string());
-                        }
-                    }
-                } else {
-                    self.processing_state = ProcessingState::Error("API key not configured".to_string());
+                                
+                                // Process single file response
+                                if let Some(ref path) = current_file {
+                                    match crate::api::process_response(response, &current_file_content, path).await {
+                                        Ok(diff) => {
+                                            let _ = prompt_tx.send(crate::tui::PromptResult::Success(diff));
+                                        }
+                                        Err(e) => {
+                                            let _ = prompt_tx.send(crate::tui::PromptResult::Error(format!("Failed to process response: {}", e)));
+                                        }
+                                    }
+                                } else {
+                                    let _ = prompt_tx.send(crate::tui::PromptResult::Error("No file selected".to_string()));
+                                }
+                            }
+                            Err(e) => {
+                                let _ = prompt_tx.send(crate::tui::PromptResult::Error(format!("API request failed: {}", e)));
+                            }
+                        };
+                    });
+                    
+                    // Clear the prompt
+                    self.current_prompt.clear();
                 }
+            }
+            KeyCode::Esc => {
+                // Cancel and return to editor mode
+                self.mode = AppMode::Editor;
+                self.current_prompt.clear();
             }
             KeyCode::Char(c) => {
                 // Add character to prompt
                 self.current_prompt.push(c);
             }
             KeyCode::Backspace => {
-                // Remove last character
+                // Remove last character from prompt
                 self.current_prompt.pop();
             }
-            _ => {
-                // Ignore other keys
-            }
+            _ => {}
         }
         
         Ok(())
@@ -1318,10 +1319,10 @@ impl App {
     /// Apply changes to all files in a multi-file diff
     pub fn apply_multi_file_changes(&mut self) -> Result<(), anyhow::Error> {
         if let Some(diffs) = &self.multi_file_diffs {
-            for (file_path, diff) in diffs {
+            for (file_name, diff) in diffs {
                 // Find the file in the selected files
                 for selected_file in &self.selected_files {
-                    if selected_file.file_name() == Some(std::ffi::OsStr::new(file_path)) {
+                    if selected_file.file_name().map_or(false, |name| name.to_string_lossy() == *file_name) {
                         // Write the modified content to the file
                         std::fs::write(selected_file, &diff.modified)?;
                         
@@ -1391,5 +1392,44 @@ impl App {
         }
         
         false
+    }
+    
+    /// Toggle showing explanation text in results view
+    pub fn toggle_explanation_view(&mut self) {
+        self.show_explanation = !self.show_explanation;
+    }
+    
+    /// Handle key events for custom model input
+    fn handle_custom_model_input_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        use crossterm::event::KeyCode;
+        
+        match key.code {
+            KeyCode::Enter => {
+                // Save the custom model if it's not empty
+                if !self.current_prompt.is_empty() {
+                    self.custom_model = self.current_prompt.clone();
+                    self.message = Some("Custom model configured successfully".to_string());
+                    self.message_type = MessageType::Success;
+                }
+                
+                // Return to configuration screen
+                self.mode = AppMode::Configuration;
+            }
+            KeyCode::Esc => {
+                // Cancel and return to configuration screen
+                self.mode = AppMode::Configuration;
+            }
+            KeyCode::Char(c) => {
+                // Add character to custom model
+                self.current_prompt.push(c);
+            }
+            KeyCode::Backspace => {
+                // Remove last character
+                self.current_prompt.pop();
+            }
+            _ => {}
+        }
+        
+        Ok(())
     }
 } 
