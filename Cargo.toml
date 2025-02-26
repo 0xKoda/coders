@@ -1,15 +1,18 @@
 [package]
-name = "coders"
+name = "code-ai"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.16", features = ["derive"] }
-tokio = { version = "1.39.3", features = ["full"] }
-reqwest = { version = "0.12.7", features = ["json", "rustls-tls"] }
-serde_json = "1.0.127"
-anyhow = "1.0.86"
-dirs = "5.0.1"
-indicatif = "0.17.7"
-colored = "2.1.0"
-similar = "2.6.0"
+anyhow = "1.0"
+clap = { version = "4.3", features = ["derive"] }
+colored = "2.0"
+dirs = "5.0"
+indicatif = "0.17"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.28", features = ["full"] }
+# TUI dependencies
+ratatui = "0.22.0"
+crossterm = "0.27.0"

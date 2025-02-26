@@ -7,6 +7,7 @@ Coders is an AI-powered command-line tool that helps you create, modify and impr
 - Flexible model selection: choose between default models or specify your own
 - Quickly iterate on code and run within the terminal
 - Diff view output: view changes in the terminal before accepting
+- AST generation: automatically generates an Abstract Syntax Tree for better code understanding
 
 
 ![Coders AI Assistant](image.png)
@@ -21,6 +22,7 @@ Coders is an AI-powered command-line tool that helps you create, modify and impr
 - `-u, --custom-model <MODEL>`: Use a custom model by providing its name
 - `-r, --reset`: Reset API key (will prompt for a new one on next run)
 - `-v, --verbose`: Enable verbose output
+- `-n, --no-ast`: Disable AST generation (AST is enabled by default)
 - `-h, --help`: Display help information and all available options
 - `-V, --version`: Print version information
 
@@ -30,6 +32,21 @@ The application uses OpenRouter as the AI provider with two default models:
 - `google/gemini-2.0-flash-001`: Gemini 2.0 Flash
 
 You can also specify any other model available on OpenRouter using the `-u/--custom-model` option.
+
+## AST Generation
+By default, the tool generates an Abstract Syntax Tree (AST) for your code to provide better context to the AI model. This helps the AI understand the structure of your code more effectively, resulting in more accurate modifications.
+
+If you want to disable AST generation for any reason, use the `-n/--no-ast` flag.
+
+### Example AST
+For a simple JavaScript function:
+```javascript
+function add(a, b) {
+  return a + b;
+}
+```
+
+The generated AST might look like:
 
 ## First-time Setup
 
