@@ -831,6 +831,8 @@ impl App {
                         Ok(_) => {
                             info!("Successfully applied multi-file changes");
                             self.set_success_message("Successfully applied all changes");
+                            // Return to file browser after applying changes
+                            self.mode = AppMode::FileBrowser;
                         }
                         Err(e) => {
                             error!("Failed to apply multi-file changes: {}", e);
@@ -850,6 +852,9 @@ impl App {
                                 
                                 // Update current file content
                                 self.current_file_content = modified_content;
+                                
+                                // Return to file browser after applying changes
+                                self.mode = AppMode::FileBrowser;
                             },
                             Err(e) => {
                                 error!("Failed to apply changes to {:?}: {}", file_path, e);
