@@ -1,31 +1,41 @@
-const TelegramBot = require('node-telegram-bot-api');
+const Discord = require('discord.js');
 
-let bot;
+let discordClient;
 
-function setupBot(token) {
-    bot = new TelegramBot(token, { polling: true });
+// Discord Bot Setup
+function setupDiscordBot(discordToken, gameContext) {
+    discordClient = new Discord.Client();
 
-    bot.on('message', (msg) => {
-        const chatId = msg.chat.id;
-        const messageText = msg.text;
+    discordClient.on('ready', () => {
+        console.log(`Logged in as ${discordClient.user.tag}!`);
+    });
 
-        if (messageText) {
-            switch (messageText) {
-                case '/hello':
-                    bot.sendMessage(chatId, 'Hello there!');
-                    break;
-
-                case '/ping':
-                    bot.sendMessage(chatId, `Pong!`);
-                    break;
-
-                default:
-                    bot.sendMessage(chatId, "I don't know that command!");
+    discordClient.on('message', msg => {
+        if (msg.content.startsWith('!move')) {
+            const moveInput = msg.content.substring(6).trim(); // Remove '!move' and trim whitespace
+            if (gameContext && gameContext.handleMove) {
+                gameContext.handleMove(moveInput, msg.channel);
+            } else {
+                msg.channel.send('Game context not properly initialized.');
             }
+        } else if (msg.content === '!board') {
+            if (gameContext && gameContext.displayBoard) {
+                gameContext.displayBoard(msg.channel);
+            } else {
+                msg.channel.send('Game context not properly initialized.');
+            }
+        } else if (msg.content === '!help') {
+            msg.channel.send('Available commands:\n!board - Displays the chessboard\n!move <startCol><startRow> <targetCol><targetRow> - Makes a move (e.g., !move a2 b3)');
         }
     });
+
+    discordClient.login(discordToken);
+
+    discordClient.on("error", console.error);
+
+    console.log('Discord bot is running...');
 }
 
 module.exports = {
-    setupBot
+    setupDiscordBot
 };

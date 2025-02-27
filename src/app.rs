@@ -190,7 +190,7 @@ impl Default for App {
             message_time: None,
             message_timeout: Duration::from_secs(3),
             
-            show_explanation: true,
+            show_explanation: false,
         }
     }
 }
@@ -735,6 +735,9 @@ impl App {
                 // Set processing state to done
                 self.processing_state = ProcessingState::Done;
                 
+                // Ensure we show code changes first, not explanation
+                self.show_explanation = false;
+                
                 // Set success message
                 self.set_success_message("Code changes generated successfully");
             }
@@ -758,6 +761,9 @@ impl App {
                     
                     // Set processing state to done
                     self.processing_state = ProcessingState::Done;
+                    
+                    // Ensure we show code changes first, not explanation
+                    self.show_explanation = false;
                     
                     // Set success message
                     self.set_success_message("Code changes generated for multiple files");
@@ -804,45 +810,51 @@ impl App {
             KeyCode::Char('y') => {
                 // Apply changes
                 if let Some(diff) = &self.current_diff {
-                    if let Some(_file_name) = &self.current_diff_file {
-                        if let Some(_multi_diffs) = &self.multi_file_diffs {
-                            // For multi-file diffs, apply all changes
-                            self.apply_multi_file_changes()?;
+                    if let Some(file_path) = &self.current_file {
+                        // For single file changes
+                        if self.multi_file_diffs.is_none() {
+                            // Write the modified content to the file
+                            std::fs::write(file_path, &diff.modified)?;
+                            
+                            // Update the in-memory content to match the file
+                            self.current_file_content = diff.modified.clone();
+                            
+                            // Set success message
+                            self.set_success_message("Changes applied successfully");
+                            
+                            // Return to editor mode
+                            self.mode = AppMode::Editor;
                         } else {
-                            // For single file diff, apply the current diff
-                            if let Some(path) = &self.current_file {
-                                // Write the modified content to the file
-                                std::fs::write(path, &diff.modified)?;
-                                
-                                // Update the content in memory
-                                self.current_file_content = diff.modified.clone();
-                                
-                                self.set_success_message("Changes applied successfully");
-                            }
+                            // For multi-file changes, apply all changes
+                            self.apply_multi_file_changes()?;
+                            
+                            // Return to file browser mode
+                            self.mode = AppMode::FileBrowser;
                         }
+                    } else {
+                        self.set_error_message("No file path available to apply changes");
                     }
+                } else {
+                    self.set_error_message("No changes to apply");
                 }
-                
-                // Return to editor mode
-                self.mode = AppMode::Editor;
-                self.current_diff = None;
-                self.current_diff_file = None;
-                self.multi_file_diffs = None;
-                self.explanation_text = None;
-                self.scroll_position = 0;
             }
             KeyCode::Char('n') => {
                 // Discard changes
-                self.mode = AppMode::Editor;
-                self.current_diff = None;
-                self.current_diff_file = None;
-                self.multi_file_diffs = None;
-                self.explanation_text = None;
-                self.scroll_position = 0;
                 self.set_info_message("Changes discarded");
+                
+                // Return to previous mode
+                if self.multi_file_diffs.is_some() {
+                    self.mode = AppMode::FileBrowser;
+                } else {
+                    self.mode = AppMode::Editor;
+                }
+            }
+            KeyCode::Char('e') => {
+                // Toggle between explanation and diff view
+                self.toggle_explanation_view();
             }
             KeyCode::Tab => {
-                // Switch between original and modified panels
+                // Toggle between original and modified panels
                 self.active_panel = match self.active_panel {
                     ActivePanel::Left => ActivePanel::Right,
                     ActivePanel::Right => ActivePanel::Left,
@@ -859,29 +871,30 @@ impl App {
                 self.scroll_position += 1;
             }
             KeyCode::Left => {
-                // Previous diff file (if multi-file)
+                // Navigate to previous file in multi-file diff
                 if self.multi_file_diffs.is_some() {
-                    self.prev_diff_file();
+                    if self.prev_diff_file() {
+                        // Reset scroll position for new file
+                        self.scroll_position = 0;
+                    }
                 }
             }
             KeyCode::Right => {
-                // Next diff file (if multi-file)
+                // Navigate to next file in multi-file diff
                 if self.multi_file_diffs.is_some() {
-                    self.next_diff_file();
+                    if self.next_diff_file() {
+                        // Reset scroll position for new file
+                        self.scroll_position = 0;
+                    }
                 }
             }
-            KeyCode::Char('e') => {
-                // Toggle explanation view
-                self.toggle_explanation_view();
-            }
-            KeyCode::Char('q') => {
-                // Return to editor mode
-                self.mode = AppMode::Editor;
-                self.current_diff = None;
-                self.current_diff_file = None;
-                self.multi_file_diffs = None;
-                self.explanation_text = None;
-                self.scroll_position = 0;
+            KeyCode::Char('q') | KeyCode::Esc => {
+                // Return to previous mode
+                if self.multi_file_diffs.is_some() {
+                    self.mode = AppMode::FileBrowser;
+                } else {
+                    self.mode = AppMode::Editor;
+                }
             }
             _ => {}
         }
@@ -1317,12 +1330,20 @@ impl App {
     /// Apply changes to all files in a multi-file diff
     pub fn apply_multi_file_changes(&mut self) -> Result<(), anyhow::Error> {
         if let Some(diffs) = &self.multi_file_diffs {
+            let mut updated_count = 0;
+            
             for (file_name, diff) in diffs {
-                // Find the file in the selected files
+                // Find the file in the selected files by comparing file names
                 for selected_file in &self.selected_files {
-                    if selected_file.file_name().map_or(false, |name| name.to_string_lossy() == *file_name) {
+                    let selected_file_name = selected_file.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    
+                    // Check if this is the file we're looking for
+                    if selected_file_name == *file_name {
                         // Write the modified content to the file
                         std::fs::write(selected_file, &diff.modified)?;
+                        updated_count += 1;
                         
                         // If this is the current file, update the content in memory
                         if Some(selected_file) == self.current_file.as_ref() {
@@ -1339,9 +1360,21 @@ impl App {
                 }
             }
             
-            self.set_success_message(&format!("Applied changes to {} files", diffs.len()));
-            self.multi_file_diffs = None;
+            if updated_count > 0 {
+                self.set_success_message(&format!("Applied changes to {} files", updated_count));
+            } else {
+                self.set_error_message("No files were updated. Could not match file names with paths.");
+            }
+        } else {
+            self.set_error_message("No multi-file changes to apply");
         }
+        
+        // Clear the diffs after applying
+        self.current_diff = None;
+        self.current_diff_file = None;
+        self.multi_file_diffs = None;
+        self.explanation_text = None;
+        self.scroll_position = 0;
         
         Ok(())
     }
