@@ -1,7 +1,7 @@
 use anyhow::Result;
+use log::{debug, info, error};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-use std::time::Duration;
+use std::time::{SystemTime, Duration, Instant};
 
 /// Represents different views/modes in the application
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,8 +128,8 @@ pub struct App {
     pub show_credits: bool,
     
     /// Message timeout (for auto-clearing messages)
-    pub message_time: Option<std::time::Instant>,
-    pub message_timeout: std::time::Duration,
+    pub message_time: Option<Instant>,
+    pub message_timeout: Duration,
     
     /// Whether to show explanation text in results view
     pub show_explanation: bool,
@@ -709,82 +709,88 @@ impl App {
         Ok(())
     }
     
-    /// Handle the result of a prompt processing
+    /// Handle the result of a prompt operation
     pub fn handle_prompt_result(&mut self, result: crate::tui::PromptResult) {
         match result {
             crate::tui::PromptResult::Success(diff) => {
-                // Store the explanation text at the app level
-                self.explanation_text = diff.explanation_text.clone();
+                // Single file response
+                self.current_diff = Some(diff.clone());
                 
-                // Set the current diff
-                self.current_diff = Some(diff);
-                
-                // Set the current diff file name
-                if let Some(path) = &self.current_file {
-                    if let Some(file_name) = path.file_name() {
+                // Extract the file name from the current file
+                if let Some(ref file_path) = self.current_file {
+                    if let Some(file_name) = file_path.file_name() {
                         self.current_diff_file = Some(file_name.to_string_lossy().to_string());
                     }
                 }
                 
-                // Clear multi-file diffs
-                self.multi_file_diffs = None;
+                // Store explanation text separately for easy access
+                if let Some(ref explanation) = diff.explanation_text {
+                    self.explanation_text = Some(explanation.clone());
+                }
                 
                 // Switch to results mode
                 self.mode = AppMode::Results;
-                
-                // Set processing state to done
                 self.processing_state = ProcessingState::Done;
                 
-                // Ensure we show code changes first, not explanation
-                self.show_explanation = false;
+                // Reset scroll position
+                self.scroll_position = 0;
                 
-                // Set success message
-                self.set_success_message("Code changes generated successfully");
-            }
+                // Log the result
+                info!("Received single file diff with {} changes", diff.changes.len());
+                if diff.explanation_text.is_some() {
+                    info!("Explanation text is available");
+                }
+            },
             crate::tui::PromptResult::MultiFileSuccess(diffs) => {
+                // Multi-file response
                 if !diffs.is_empty() {
-                    // Store the explanation text at the app level (use the first diff's explanation)
-                    if let Some((_, first_diff)) = diffs.first() {
-                        self.explanation_text = first_diff.explanation_text.clone();
-                    }
-                    
-                    // Set the first diff as the current diff
-                    let (first_file, first_diff) = diffs[0].clone();
-                    self.current_diff = Some(first_diff);
-                    self.current_diff_file = Some(first_file);
-                    
                     // Store all diffs
-                    self.multi_file_diffs = Some(diffs);
+                    self.multi_file_diffs = Some(diffs.clone());
+                    
+                    // Set the current diff to the first file
+                    let (file_name, diff) = &diffs[0];
+                    self.current_diff_file = Some(file_name.clone());
+                    self.current_diff = Some(diff.clone());
+                    
+                    // Store explanation text separately for easy access
+                    if let Some(ref explanation) = diff.explanation_text {
+                        self.explanation_text = Some(explanation.clone());
+                    }
                     
                     // Switch to results mode
                     self.mode = AppMode::Results;
-                    
-                    // Set processing state to done
                     self.processing_state = ProcessingState::Done;
                     
-                    // Ensure we show code changes first, not explanation
-                    self.show_explanation = false;
+                    // Reset scroll position
+                    self.scroll_position = 0;
                     
-                    // Set success message
-                    self.set_success_message("Code changes generated for multiple files");
+                    // Log the result
+                    info!("Received multi-file diff with {} files", diffs.len());
+                    if diff.explanation_text.is_some() {
+                        info!("Explanation text is available");
+                    }
                 } else {
-                    // No diffs were generated
-                    self.processing_state = ProcessingState::Error("No code changes were generated".to_string());
-                    self.set_error_message("No code changes were generated");
+                    // No diffs received
+                    self.set_error_message("No changes were generated");
+                    self.processing_state = ProcessingState::Error("No changes were generated".to_string());
                 }
-            }
-            crate::tui::PromptResult::Error(error) => {
-                // Show error message and stay in prompt mode
-                self.set_error_message(&format!("API error: {}", error));
-                self.processing_state = ProcessingState::Error(error);
-            }
+            },
+            crate::tui::PromptResult::Error(err) => {
+                // Error response
+                self.set_error_message(&format!("Error: {}", err));
+                self.processing_state = ProcessingState::Error(err);
+            },
             crate::tui::PromptResult::CreditsInfo(credits_info) => {
-                // Update credits information
+                // Credits info response
                 self.credits_info = Some(credits_info);
+                self.show_credits = true;
+                self.mode = AppMode::Credits;
                 self.processing_state = ProcessingState::Done;
-                self.set_success_message("Credits information updated");
-            }
+            },
         }
+        
+        // Log the state of the diff viewer for debugging
+        self.log_diff_viewer_state();
     }
     
     /// Update spinner animation frame and check message timeout
@@ -804,102 +810,177 @@ impl App {
     }
     
     fn handle_results_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        use crossterm::event::KeyCode;
-        
         match key.code {
-            KeyCode::Char('y') => {
+            crossterm::event::KeyCode::Char('q') => {
+                self.mode = AppMode::FileBrowser;
+                Ok(())
+            },
+            crossterm::event::KeyCode::Char('y') => {
                 // Apply changes
-                if let Some(diff) = &self.current_diff {
-                    if let Some(file_path) = &self.current_file {
-                        // For single file changes
-                        if self.multi_file_diffs.is_none() {
-                            // Write the modified content to the file
-                            std::fs::write(file_path, &diff.modified)?;
-                            
-                            // Update the in-memory content to match the file
-                            self.current_file_content = diff.modified.clone();
-                            
-                            // Set success message
-                            self.set_success_message("Changes applied successfully");
-                            
-                            // Return to editor mode
-                            self.mode = AppMode::Editor;
-                        } else {
-                            // For multi-file changes, apply all changes
-                            self.apply_multi_file_changes()?;
-                            
-                            // Return to file browser mode
-                            self.mode = AppMode::FileBrowser;
+                info!("User pressed 'y' to apply changes");
+                
+                if let Some(ref multi_diffs) = self.multi_file_diffs {
+                    // We have multi-file diffs
+                    info!("Found multi-file diffs with {} files", multi_diffs.len());
+                    
+                    for (filename, _) in multi_diffs {
+                        info!("Multi-file diff includes: {}", filename);
+                    }
+                    
+                    match self.apply_multi_file_changes() {
+                        Ok(_) => {
+                            info!("Successfully applied multi-file changes");
+                            self.set_success_message("Successfully applied all changes");
+                        }
+                        Err(e) => {
+                            error!("Failed to apply multi-file changes: {}", e);
+                            self.set_error_message(&format!("Error applying changes: {}", e));
+                        }
+                    }
+                } else if let Some(ref diff) = self.current_diff {
+                    // We have a single file diff
+                    if let Some(ref file_path) = self.current_file {
+                        info!("Applying changes to single file: {:?}", file_path);
+                        let modified_content = diff.modified.clone();
+                        match std::fs::write(file_path, &modified_content) {
+                            Ok(_) => {
+                                info!("Successfully applied changes to {:?}", file_path);
+                                self.set_success_message(&format!("Applied changes to {}", 
+                                    file_path.file_name().unwrap_or_default().to_string_lossy()));
+                                
+                                // Update current file content
+                                self.current_file_content = modified_content;
+                            },
+                            Err(e) => {
+                                error!("Failed to apply changes to {:?}: {}", file_path, e);
+                                self.set_error_message(&format!("Failed to apply changes: {}", e));
+                            }
                         }
                     } else {
-                        self.set_error_message("No file path available to apply changes");
+                        error!("No current file selected to apply diff to");
+                        self.set_error_message("No file selected to apply changes to");
                     }
                 } else {
-                    self.set_error_message("No changes to apply");
+                    info!("No diffs to apply");
+                    self.set_info_message("No changes to apply");
                 }
-            }
-            KeyCode::Char('n') => {
-                // Discard changes
-                self.set_info_message("Changes discarded");
-                
-                // Return to previous mode
-                if self.multi_file_diffs.is_some() {
-                    self.mode = AppMode::FileBrowser;
-                } else {
-                    self.mode = AppMode::Editor;
-                }
-            }
-            KeyCode::Char('e') => {
-                // Toggle between explanation and diff view
+                Ok(())
+            },
+            crossterm::event::KeyCode::Char('n') => {
+                // Reject changes
+                self.mode = AppMode::FileBrowser;
+                self.set_info_message("Changes rejected");
+                Ok(())
+            },
+            crossterm::event::KeyCode::Char('e') => {
+                // Toggle explanation view
                 self.toggle_explanation_view();
-            }
-            KeyCode::Tab => {
-                // Toggle between original and modified panels
+                Ok(())
+            },
+            crossterm::event::KeyCode::Tab => {
+                // Switch active panel
                 self.active_panel = match self.active_panel {
                     ActivePanel::Left => ActivePanel::Right,
                     ActivePanel::Right => ActivePanel::Left,
                 };
-            }
-            KeyCode::Up => {
-                // Scroll up
-                if self.scroll_position > 0 {
-                    self.scroll_position -= 1;
+                Ok(())
+            },
+            crossterm::event::KeyCode::Right => {
+                // Show next file diff
+                if self.next_diff_file() {
+                    self.set_info_message("Showing next file diff");
                 }
-            }
-            KeyCode::Down => {
-                // Scroll down
-                self.scroll_position += 1;
-            }
-            KeyCode::Left => {
-                // Navigate to previous file in multi-file diff
-                if self.multi_file_diffs.is_some() {
-                    if self.prev_diff_file() {
-                        // Reset scroll position for new file
-                        self.scroll_position = 0;
-                    }
+                Ok(())
+            },
+            crossterm::event::KeyCode::Left => {
+                // Show previous file diff
+                if self.prev_diff_file() {
+                    self.set_info_message("Showing previous file diff");
                 }
-            }
-            KeyCode::Right => {
-                // Navigate to next file in multi-file diff
-                if self.multi_file_diffs.is_some() {
-                    if self.next_diff_file() {
-                        // Reset scroll position for new file
-                        self.scroll_position = 0;
-                    }
+                Ok(())
+            },
+            crossterm::event::KeyCode::Up => {
+                // Scroll up based on active panel
+                match self.active_panel {
+                    ActivePanel::Left => {
+                        if self.scroll_position > 0 {
+                            self.scroll_position -= 1;
+                        }
+                    },
+                    ActivePanel::Right => {
+                        if self.scroll_position > 0 {
+                            self.scroll_position -= 1;
+                        }
+                    },
                 }
-            }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                // Return to previous mode
-                if self.multi_file_diffs.is_some() {
-                    self.mode = AppMode::FileBrowser;
+                Ok(())
+            },
+            crossterm::event::KeyCode::Down => {
+                // Scroll down based on active panel
+                match self.active_panel {
+                    ActivePanel::Left => {
+                        // Limit scrolling based on content length
+                        if let Some(ref diff) = self.current_diff {
+                            let line_count = diff.original.lines().count();
+                            if self.scroll_position < line_count.saturating_sub(10) {
+                                self.scroll_position += 1;
+                            }
+                        }
+                    },
+                    ActivePanel::Right => {
+                        // Limit scrolling based on content length
+                        if let Some(ref diff) = self.current_diff {
+                            let line_count = diff.modified.lines().count();
+                            if self.scroll_position < line_count.saturating_sub(10) {
+                                self.scroll_position += 1;
+                            }
+                        }
+                    },
+                }
+                Ok(())
+            },
+            crossterm::event::KeyCode::Home => {
+                // Scroll to top
+                self.scroll_position = 0;
+                Ok(())
+            },
+            crossterm::event::KeyCode::End => {
+                // Scroll to bottom
+                if let Some(ref diff) = self.current_diff {
+                    let line_count = match self.active_panel {
+                        ActivePanel::Left => diff.original.lines().count(),
+                        ActivePanel::Right => diff.modified.lines().count(),
+                    };
+                    self.scroll_position = line_count.saturating_sub(10);
+                }
+                Ok(())
+            },
+            crossterm::event::KeyCode::PageUp => {
+                // Scroll up by 10 lines
+                if self.scroll_position >= 10 {
+                    self.scroll_position -= 10;
                 } else {
-                    self.mode = AppMode::Editor;
+                    self.scroll_position = 0;
                 }
-            }
-            _ => {}
+                Ok(())
+            },
+            crossterm::event::KeyCode::PageDown => {
+                // Scroll down by 10 lines
+                if let Some(ref diff) = self.current_diff {
+                    let line_count = match self.active_panel {
+                        ActivePanel::Left => diff.original.lines().count(),
+                        ActivePanel::Right => diff.modified.lines().count(),
+                    };
+                    if self.scroll_position + 10 < line_count.saturating_sub(10) {
+                        self.scroll_position += 10;
+                    } else {
+                        self.scroll_position = line_count.saturating_sub(10);
+                    }
+                }
+                Ok(())
+            },
+            _ => Ok(()),
         }
-        
-        Ok(())
     }
     
     fn handle_help_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
@@ -961,21 +1042,21 @@ impl App {
     pub fn set_info_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Info;
-        self.message_time = Some(std::time::Instant::now());
+        self.message_time = Some(Instant::now());
     }
     
     /// Set an error message
     pub fn set_error_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Error;
-        self.message_time = Some(std::time::Instant::now());
+        self.message_time = Some(Instant::now());
     }
     
     /// Set a success message
     pub fn set_success_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
         self.message_type = MessageType::Success;
-        self.message_time = Some(std::time::Instant::now());
+        self.message_time = Some(Instant::now());
     }
     
     /// Handle key events for file selection mode
@@ -1327,107 +1408,287 @@ impl App {
         Ok(())
     }
     
-    /// Apply changes to all files in a multi-file diff
+    /// Apply changes from a multi-file response
     pub fn apply_multi_file_changes(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(diffs) = &self.multi_file_diffs {
-            let mut updated_count = 0;
+        // Check if we have multi-file diffs
+        let diffs_info = if let Some(ref diffs) = self.multi_file_diffs {
+            if diffs.is_empty() {
+                self.set_info_message("No changes to apply");
+                return Ok(());
+            }
             
-            for (file_name, diff) in diffs {
-                // Find the file in the selected files by comparing file names
-                for selected_file in &self.selected_files {
-                    let selected_file_name = selected_file.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default();
+            // Log what we're trying to apply
+            info!("Attempting to apply changes to {} files", diffs.len());
+            for (file_name, _) in diffs {
+                info!("  - {}", file_name);
+            }
+            
+            // Clone the necessary data to avoid borrow checker issues
+            let diffs_count = diffs.len();
+            let diffs_clone: Vec<(String, FileDiff)> = diffs.clone();
+            Some((diffs_count, diffs_clone))
+        } else {
+            self.set_info_message("No multi-file changes to apply");
+            return Ok(());
+        };
+        
+        // Unwrap the tuple since we know it's Some at this point
+        let (diffs_count, diffs) = diffs_info.unwrap();
+        let mut success_count = 0;
+        let mut error_messages = Vec::new();
+        
+        // For each file, try to apply the changes
+        for (file_name, diff) in diffs {
+            // Find the file path
+            let file_path = match self.find_file_path(&file_name) {
+                Some(path) => {
+                    info!("Found existing file path for {}: {:?}", file_name, path);
+                    path
+                },
+                None => {
+                    // For new files, create in the current directory
+                    let new_path = if file_name.contains('/') || file_name.contains('\\') {
+                        // If the file_name has directory components, respect those
+                        let path = Path::new(&file_name);
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        path.to_path_buf()
+                    } else {
+                        self.current_dir.join(&file_name)
+                    };
                     
-                    // Check if this is the file we're looking for
-                    if selected_file_name == *file_name {
-                        // Write the modified content to the file
-                        std::fs::write(selected_file, &diff.modified)?;
-                        updated_count += 1;
-                        
-                        // If this is the current file, update the content in memory
-                        if Some(selected_file) == self.current_file.as_ref() {
-                            self.current_file_content = diff.modified.clone();
+                    info!("Creating new file: {:?}", new_path);
+                    // Check if the parent directory exists, and create if not
+                    if let Some(parent) = new_path.parent() {
+                        if !parent.exists() {
+                            info!("Creating parent directory: {:?}", parent);
+                            std::fs::create_dir_all(parent)?;
                         }
-                        
-                        // Update the selected files content
-                        if let Some(idx) = self.selected_files_content.iter().position(|(path, _)| path == selected_file) {
-                            self.selected_files_content[idx].1 = diff.modified.clone();
-                        }
-                        
-                        break;
                     }
+                    new_path
+                }
+            };
+            
+            // Apply the changes
+            let result = std::fs::write(&file_path, &diff.modified);
+            
+            match result {
+                Ok(_) => {
+                    info!("Successfully applied changes to {}", file_name);
+                    success_count += 1;
+                },
+                Err(e) => {
+                    let error = format!("Failed to create new file {}: {}", file_name, e);
+                    error!("{}", error);
+                    error_messages.push(error);
                 }
             }
-            
-            if updated_count > 0 {
-                self.set_success_message(&format!("Applied changes to {} files", updated_count));
-            } else {
-                self.set_error_message("No files were updated. Could not match file names with paths.");
-            }
-        } else {
-            self.set_error_message("No multi-file changes to apply");
         }
         
-        // Clear the diffs after applying
-        self.current_diff = None;
-        self.current_diff_file = None;
-        self.multi_file_diffs = None;
-        self.explanation_text = None;
-        self.scroll_position = 0;
+        // Refresh the file list to show the new files
+        self.refresh_file_list()?;
+        
+        // Set a message based on the results
+        if success_count == diffs_count {
+            self.set_success_message(&format!(
+                "Successfully modified {} file{}",
+                success_count,
+                if success_count > 1 { "s" } else { "" }
+            ));
+        } else if success_count > 0 {
+            self.set_info_message(&format!(
+                "Applied changes to {} file{}, but failed on {} file{}",
+                success_count,
+                if success_count > 1 { "s" } else { "" },
+                diffs_count - success_count,
+                if diffs_count - success_count > 1 { "s" } else { "" }
+            ));
+        } else {
+            self.set_error_message(&format!("Failed to apply any changes: {}", error_messages.join(", ")));
+        }
         
         Ok(())
     }
     
-    /// Move to the next file in a multi-file diff
+    /// Find a file path by name
+    fn find_file_path(&self, file_name: &str) -> Option<PathBuf> {
+        // Log for debugging
+        info!("Looking for file path matching: {}", file_name);
+        
+        // Normalize the file name (remove leading ./ if present)
+        let normalized_name = if file_name.starts_with("./") {
+            &file_name[2..]
+        } else {
+            file_name
+        };
+        
+        // First try exact path match in the file list and selected files
+        for paths in &[&self.file_list, &self.selected_files] {
+            for path in *paths {
+                let path_str = path.to_string_lossy().to_string();
+                if path_str.ends_with(normalized_name) {
+                    info!("Found exact path match: {:?}", path);
+                    return Some(path.clone());
+                }
+            }
+        }
+        
+        // Try exact filename match (just the file name, not path)
+        for paths in &[&self.file_list, &self.selected_files] {
+            for path in *paths {
+                if let Some(name) = path.file_name() {
+                    let name_str = name.to_string_lossy();
+                    if name_str == normalized_name {
+                        info!("Found exact filename match: {:?}", path);
+                        return Some(path.clone());
+                    }
+                }
+            }
+        }
+        
+        // Try extracting just the basename from the file_name if it contains path separators
+        let basename = if normalized_name.contains('/') || normalized_name.contains('\\') {
+            Path::new(normalized_name)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        } else {
+            Some(normalized_name.to_string())
+        };
+        
+        if let Some(basename) = basename {
+            // Try basename match
+            for paths in &[&self.selected_files, &self.file_list] {
+                for path in *paths {
+                    if let Some(name) = path.file_name() {
+                        if name.to_string_lossy() == basename {
+                            info!("Found basename match: {:?}", path);
+                            return Some(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Try case insensitive match
+        let lowercase_name = normalized_name.to_lowercase();
+        for paths in &[&self.selected_files, &self.file_list] {
+            for path in *paths {
+                if let Some(name) = path.file_name() {
+                    if name.to_string_lossy().to_lowercase() == lowercase_name {
+                        info!("Found case-insensitive match: {:?}", path);
+                        return Some(path.clone());
+                    }
+                }
+            }
+        }
+        
+        // If the context file is set, try to use its directory for relative paths
+        if let Some(ref context_file) = self.current_file {
+            if let Some(parent) = context_file.parent() {
+                let potential_path = parent.join(normalized_name);
+                if potential_path.exists() {
+                    info!("Found using context file's directory: {:?}", potential_path);
+                    return Some(potential_path);
+                }
+            }
+        }
+        
+        // No match found
+        info!("No matching file found for: {}", file_name);
+        None
+    }
+    
+    /// Navigate to the next file diff
     pub fn next_diff_file(&mut self) -> bool {
-        if let Some(diffs) = &self.multi_file_diffs {
-            if let Some(current_file) = &self.current_diff_file {
-                // Find the current file index
-                if let Some(idx) = diffs.iter().position(|(file, _)| file == current_file) {
-                    // If there's a next file, move to it
-                    if idx + 1 < diffs.len() {
-                        let (next_file, next_diff) = &diffs[idx + 1];
-                        self.current_diff = Some(next_diff.clone());
-                        self.current_diff_file = Some(next_file.clone());
-                        self.scroll_position = 0;
-                        self.set_info_message(&format!("Reviewing file {} of {}: {}", 
-                                                     idx + 2, diffs.len(), next_file));
-                        return true;
-                    }
-                }
+        if let Some(ref multi_diffs) = self.multi_file_diffs {
+            if multi_diffs.is_empty() {
+                return false;
             }
+            
+            // Find the index of the current file
+            let current_idx = if let Some(ref current_file) = self.current_diff_file {
+                multi_diffs.iter().position(|(file_name, _)| file_name == current_file)
+            } else {
+                None
+            };
+            
+            // Calculate the next index
+            let next_idx = match current_idx {
+                Some(idx) if idx + 1 < multi_diffs.len() => idx + 1,
+                Some(_) => 0, // Wrap around to the first file
+                None => 0,    // Start with the first file
+            };
+            
+            // Set the current diff to the next file
+            let (file_name, diff) = &multi_diffs[next_idx];
+            self.current_diff_file = Some(file_name.clone());
+            self.current_diff = Some(diff.clone());
+            
+            // Reset scroll position when changing files
+            self.scroll_position = 0;
+            
+            // Log the navigation
+            info!("Navigated to next file: {}", file_name);
+            
+            true
+        } else {
+            false
         }
-        
-        false
     }
     
-    /// Move to the previous file in a multi-file diff
+    /// Navigate to the previous file diff
     pub fn prev_diff_file(&mut self) -> bool {
-        if let Some(diffs) = &self.multi_file_diffs {
-            if let Some(current_file) = &self.current_diff_file {
-                // Find the current file index
-                if let Some(idx) = diffs.iter().position(|(file, _)| file == current_file) {
-                    // If there's a previous file, move to it
-                    if idx > 0 {
-                        let (prev_file, prev_diff) = &diffs[idx - 1];
-                        self.current_diff = Some(prev_diff.clone());
-                        self.current_diff_file = Some(prev_file.clone());
-                        self.scroll_position = 0;
-                        self.set_info_message(&format!("Reviewing file {} of {}: {}", 
-                                                     idx, diffs.len(), prev_file));
-                        return true;
-                    }
-                }
+        if let Some(ref multi_diffs) = self.multi_file_diffs {
+            if multi_diffs.is_empty() {
+                return false;
             }
+            
+            // Find the index of the current file
+            let current_idx = if let Some(ref current_file) = self.current_diff_file {
+                multi_diffs.iter().position(|(file_name, _)| file_name == current_file)
+            } else {
+                None
+            };
+            
+            // Calculate the previous index
+            let prev_idx = match current_idx {
+                Some(0) => multi_diffs.len() - 1, // Wrap around to the last file
+                Some(idx) => idx - 1,
+                None => 0, // Start with the first file
+            };
+            
+            // Set the current diff to the previous file
+            let (file_name, diff) = &multi_diffs[prev_idx];
+            self.current_diff_file = Some(file_name.clone());
+            self.current_diff = Some(diff.clone());
+            
+            // Reset scroll position when changing files
+            self.scroll_position = 0;
+            
+            // Log the navigation
+            info!("Navigated to previous file: {}", file_name);
+            
+            true
+        } else {
+            false
         }
-        
-        false
     }
     
-    /// Toggle showing explanation text in results view
+    /// Toggle between explanation and diff views
     pub fn toggle_explanation_view(&mut self) {
+        // Toggle the flag
         self.show_explanation = !self.show_explanation;
+        
+        // Reset scroll position when toggling views
+        self.scroll_position = 0;
+        
+        // Log the toggle action
+        if self.show_explanation {
+            debug!("Switched to explanation view");
+        } else {
+            debug!("Switched to diff view");
+        }
     }
     
     /// Handle key events for custom model input
@@ -1441,12 +1702,14 @@ impl App {
                     self.custom_model = self.current_prompt.clone();
                     // Set the selected model to the custom model value
                     self.selected_model = self.current_prompt.clone();
-                    self.message = Some("Custom model configured and selected".to_string());
-                    self.message_type = MessageType::Success;
+                    let success_message = format!("Custom model '{}' configured and selected", self.current_prompt);
+                    self.set_success_message(&success_message);
                     
-                    // Save to config
-                    if let Some(api_key) = &self.api_key {
-                        crate::config::save_preferred_model(&self.selected_model)?;
+                    // Save model to config if we have an API key
+                    if let Some(_api_key) = &self.api_key {
+                        if let Some(_config_dir) = dirs::config_dir() {
+                            let _ = crate::api::save_preferred_model(&self.selected_model);
+                        }
                     }
                 }
                 
@@ -1470,4 +1733,40 @@ impl App {
         
         Ok(())
     }
-} 
+
+    /// Log the current state of the diff viewer for debugging
+    fn log_diff_viewer_state(&self) {
+        if let Some(ref diff_file) = self.current_diff_file {
+            info!("Current diff file: {}", diff_file);
+        } else {
+            info!("No current diff file");
+        }
+        
+        if let Some(ref diff) = self.current_diff {
+            info!("Current diff: {} original lines, {} modified lines", 
+                  diff.original.lines().count(),
+                  diff.modified.lines().count());
+            
+            if let Some(ref explanation) = diff.explanation_text {
+                info!("Explanation text available: {} chars", explanation.len());
+            } else {
+                info!("No explanation text in current diff");
+            }
+        } else {
+            info!("No current diff");
+        }
+        
+        if let Some(ref multi_diffs) = self.multi_file_diffs {
+            info!("Multi-file diffs: {} files", multi_diffs.len());
+            for (file_name, _) in multi_diffs {
+                info!("  - {}", file_name);
+            }
+        } else {
+            info!("No multi-file diffs");
+        }
+        
+        info!("Active panel: {:?}", self.active_panel);
+        info!("Scroll position: {}", self.scroll_position);
+        info!("Show explanation: {}", self.show_explanation);
+    }
+}

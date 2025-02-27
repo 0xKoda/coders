@@ -202,25 +202,87 @@ pub fn apply_patch_to_string(original: &str, patch: &str) -> anyhow::Result<Stri
     Ok(modified)
 }
 
+/// Apply a diff to a string
+pub fn apply_diff(original: &str, diff: &crate::app::FileDiff) -> anyhow::Result<String> {
+    // If there are no changes, return the original content
+    if diff.changes.is_empty() {
+        return Ok(original.to_string());
+    }
+    
+    // Split the original content into lines
+    let original_lines: Vec<&str> = original.lines().collect();
+    let mut result_lines: Vec<String> = original_lines.iter().map(|&s| s.to_string()).collect();
+    
+    // Sort changes by line number in reverse order to avoid index shifting
+    let mut sorted_changes = diff.changes.clone();
+    sorted_changes.sort_by(|a, b| b.line_number.cmp(&a.line_number));
+    
+    // Apply each change
+    for change in sorted_changes {
+        let line_idx = change.line_number;
+        
+        match change.change_type {
+            crate::app::ChangeType::Insert => {
+                // Insert a new line
+                if line_idx >= result_lines.len() {
+                    result_lines.push(change.content);
+                } else {
+                    result_lines.insert(line_idx, change.content);
+                }
+            },
+            crate::app::ChangeType::Delete => {
+                // Delete a line if it exists
+                if line_idx < result_lines.len() {
+                    result_lines.remove(line_idx);
+                }
+            },
+            crate::app::ChangeType::Modify => {
+                // Modify a line if it exists
+                if line_idx < result_lines.len() {
+                    result_lines[line_idx] = change.content;
+                }
+            },
+        }
+    }
+    
+    // Join the lines back into a string
+    Ok(result_lines.join("\n"))
+}
+
 /// Parse a diff string into a FileDiff struct
 pub fn parse_diff(diff_str: &str) -> anyhow::Result<crate::app::FileDiff> {
-    // For now, we'll just return a simple diff that replaces the entire file
-    // In a real implementation, this would parse the diff format
+    // Extract explanation text if present (text before any code blocks)
+    let explanation_text = extract_explanation_text(diff_str);
     
+    // For now, we'll create a simple diff that contains the entire content
+    // In a real implementation, this would parse a proper diff format
     Ok(FileDiff {
         original: String::new(),
         modified: diff_str.to_string(),
         changes: Vec::new(),
-        explanation_text: None,
+        explanation_text,
     })
 }
 
-/// Apply a diff to a string
-pub fn apply_diff(_original: &str, diff: &crate::app::FileDiff) -> anyhow::Result<String> {
-    // For now, we'll just return the modified content from the diff
-    // In a real implementation, this would apply the changes in the diff
+/// Extract explanation text from a diff string
+fn extract_explanation_text(diff_str: &str) -> Option<String> {
+    // Simple heuristic: extract text before the first code block or file marker
+    let lines: Vec<&str> = diff_str.lines().collect();
+    let mut explanation = Vec::new();
     
-    Ok(diff.modified.clone())
+    for line in lines {
+        // Stop at code block markers or file markers
+        if line.starts_with("```") || line.starts_with("File:") {
+            break;
+        }
+        explanation.push(line);
+    }
+    
+    if explanation.is_empty() {
+        None
+    } else {
+        Some(explanation.join("\n"))
+    }
 }
 
 /// Create a diff between two files

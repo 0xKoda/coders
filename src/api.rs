@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use log::{debug, info, error};
+use serde::Deserialize;
 
 // Default models for OpenRouter
 pub const DEFAULT_CLAUDE: &str = "anthropic/claude-3.7-sonnet:beta";
@@ -83,65 +85,130 @@ pub async fn send_code_modification_request(
     model: &str,
     language: &str,
 ) -> Result<String> {
-    let client = Client::new();
-    let url = "https://openrouter.ai/api/v1/chat/completions";
-
-    // Create context with or without AST
-    let context = match ast {
-        Some(ast_content) => {
-            format!(
-                "{}\n\nCode:\n{}\n\nAbstract Syntax Tree:\n{}", 
-                prompt, code, ast_content
-            )
-        }
-        None => format!("{}\n\n{}", prompt, code),
+    info!("Sending code modification request to model: {}", model);
+    debug!("Language: {}, Code length: {} bytes", language, code.len());
+    debug!("Prompt: {}", prompt);
+    
+    // Construct a prompt message that includes instructions for modifying code
+    let system_message = format!(
+        "You are a helpful AI coding assistant. You will be given a user request and their code in {}. 
+        Your task is to modify the code according to the user's request.
+        Respond with both an explanation of the changes and the modified code.
+        
+        Guidelines:
+        1. Always respond with the full, modified version of the original code
+        2. Wrap the code in triple backticks (```) with the language name
+        3. Explain what changes you made and why
+        4. If the user wants a completely new implementation, provide a full solution
+        5. Use best practices and write efficient, clean code",
+        language
+    );
+    
+    // Create full user message with prompt and code
+    let user_message = format!(
+        "Here is my code in {}:\n\n```\n{}\n```\n\nRequest: {}\n\nPlease provide a full, modified version of the code that addresses my request, along with an explanation of your changes.",
+        language, code, prompt
+    );
+    
+    // Add AST information if available
+    let user_message = if let Some(ast_data) = ast {
+        format!("{}\n\nHere is the AST for the code:\n```\n{}\n```", user_message, ast_data)
+    } else {
+        user_message
     };
-
-    let user_message = format!("The following code is in {}. {}", language, context);
-
-    let request_body = json!({
+    
+    // Create request payload
+    let payload = serde_json::json!({
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are an assistant helping a developer construct code. Follow instructions carefully and only output the code. Output only the changes, not the entire code."},
-            {"role": "user", "content": "add a var sydney to this code | var yemen = 'Middle Eastern country'; var australia = 'Down Under'; function getPopulation(country) { if (country === yemen) { return 30000000; } else if (country === australia) { return 25000000; } else { return 'Unknown'; } }"},
-            {"role": "assistant", "content": "```javascript\nvar yemen = 'Middle Eastern country';\nvar australia = 'Down Under';\nvar sydney = 'Largest city in Australia';\n\nfunction getPopulation(country) {\n    if (country === yemen) {\n        return 30000000;\n    } else if (country === australia) {\n        return 25000000;\n    } else if (country === sydney) {\n        return 5000000;\n    } else {\n        return 'Unknown';\n    }\n}```"},
-            {"role": "user", "content": "Add a function to calculate factorial in Python | def square(n): return n * n"},
-            {"role": "assistant", "content": "```python\ndef square(n): return n * n\ndef factorial(n):\n    if n == 0 or n == 1:\n        return 1\n    else:\n        return n * factorial(n - 1)```"},
-            {"role": "user", "content": "Fix the syntax error in this Rust code | fn main() { println(\"Hello, world!\"); }"},
-            {"role": "assistant", "content": "```rust\nfn main() {\n    println!(\"Hello, world!\");\n}```"},
-            {"role": "user", "content": "Add error handling to this JavaScript function | function divide(a, b) { return a / b; }"},
-            {"role": "assistant", "content": "```javascript\nfunction divide(a, b) {\n    if (b === 0) {\n        throw new Error(\"Division by zero\");\n    }\n    return a / b;\n}```"},
-            {"role": "user", "content": user_message}
+            {
+                "role": "system",
+                "content": system_message
+            },
+            {
+                "role": "user", 
+                "content": user_message
+            }
         ],
-        "max_tokens": 2048,
-        "temperature": 0.7,
-        "top_p": 0.9,
+        "temperature": get_model_temperature(model),
+        "max_tokens": 8000
     });
-
-    let response = client.post(url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&request_body)
+    
+    debug!("Sending request to OpenRouter with payload length: {} bytes", 
+           serde_json::to_string(&payload)?.len());
+    
+    // Set up headers
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION, 
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))?
+    );
+    headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("application/json"));
+    headers.insert("HTTP-Referer", reqwest::header::HeaderValue::from_static("https://github.com/yourname/code-ai"));
+    headers.insert("X-Title", reqwest::header::HeaderValue::from_static("Code-AI Assistant"));
+    
+    // Send request
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .headers(headers)
+        .json(&payload)
         .send()
         .await?;
-
-    if response.status().is_success() {
-        let body = response.text().await?;
-        
-        if body.is_empty() {
-            return Err(anyhow::anyhow!("Received empty response from OpenRouter API"));
-        }
-        
-        let json_response: serde_json::Value = serde_json::from_str(&body)?;
-        
-        let content = json_response["choices"][0]["message"]["content"]
-            .as_str()
-            .context("Could not extract content from response")?;
-        
-        Ok(content.to_string())
-    } else {
+    
+    // Check response status
+    if !response.status().is_success() {
         let error_text = response.text().await?;
-        Err(anyhow::anyhow!("API error response: {}", error_text))
+        error!("OpenRouter API error: {}", error_text);
+        return Err(anyhow::anyhow!("API error: {}", error_text));
+    }
+    
+    // Parse response
+    let response_text = response.text().await?;
+    debug!("Received response from OpenRouter: {} bytes", response_text.len());
+    
+    // Create a sanitized version for logging (truncated to avoid giant log files)
+    let max_log_length = 1000;
+    let truncated_response = if response_text.len() > max_log_length {
+        format!("{}... [truncated, total length: {}]", 
+                &response_text[0..max_log_length], 
+                response_text.len())
+    } else {
+        response_text.clone()
+    };
+    
+    debug!("Response content: {}", truncated_response);
+    
+    #[derive(Deserialize)]
+    struct OpenRouterResponse {
+        choices: Vec<OpenRouterChoice>,
+    }
+    
+    #[derive(Deserialize)]
+    struct OpenRouterChoice {
+        message: OpenRouterMessage,
+    }
+    
+    #[derive(Deserialize)]
+    struct OpenRouterMessage {
+        content: String,
+    }
+    
+    let response_data: OpenRouterResponse = match serde_json::from_str(&response_text) {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Failed to parse OpenRouter response: {}", e);
+            return Err(anyhow::anyhow!("Failed to parse API response: {}", e));
+        }
+    };
+    
+    // Get the content from the first choice
+    if let Some(choice) = response_data.choices.first() {
+        info!("Successfully received code modification response");
+        Ok(choice.message.content.clone())
+    } else {
+        error!("No choices in the API response");
+        Err(anyhow::anyhow!("No content in the API response"))
     }
 }
 
@@ -265,47 +332,105 @@ pub fn extract_code_from_response(response: &str) -> String {
     code
 }
 
-/// Extract explanatory text from the response (text that's not inside code blocks)
+/// Extract explanation text from a response
 fn extract_explanation_text(response: &str) -> Option<String> {
-    let mut explanation_text = String::new();
-    let mut in_code_block = false;
-    let mut current_text = String::new();
+    // Log the response we're extracting from
+    log::debug!("Extracting explanation from response of length: {}", response.len());
     
-    for line in response.lines() {
-        if line.trim().starts_with("```") {
-            in_code_block = !in_code_block;
-            
-            // If we're exiting a code block, add any accumulated text
-            if in_code_block {
-                if !current_text.trim().is_empty() {
-                    explanation_text.push_str(&current_text);
-                    explanation_text.push('\n');
-                    current_text.clear();
-                }
-            }
-            continue;
+    // Split the response into lines
+    let lines: Vec<&str> = response.lines().collect();
+    
+    // Skip initial empty lines
+    let mut i = 0;
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    
+    // Skip lines that might be part of markdown formatting at the beginning
+    // like "```" if it's the first line
+    if i < lines.len() && lines[i].trim() == "```" {
+        i += 1;
+    }
+    
+    let mut explanation = Vec::new();
+    
+    // Collect lines until we hit a code block or file marker
+    while i < lines.len() {
+        let line = lines[i].trim();
+        
+        // Break if we hit a code block or file marker
+        if line.starts_with("```") || 
+           line.starts_with("File:") || 
+           line.starts_with("file:") {
+            break;
         }
         
-        if !in_code_block {
-            current_text.push_str(line);
-            current_text.push('\n');
-        }
+        explanation.push(lines[i]);
+        i += 1;
     }
     
-    // Add any remaining text
-    if !current_text.trim().is_empty() {
-        explanation_text.push_str(&current_text);
-    }
-    
-    let trimmed = explanation_text.trim();
-    if trimmed.is_empty() {
-        None
+    // If we collected any explanation lines, join them and return
+    if !explanation.is_empty() {
+        let result = explanation.join("\n");
+        log::info!("Extracted explanation of length: {}", result.len());
+        Some(result)
     } else {
-        Some(trimmed.to_string())
+        // If we didn't find any explanation at the beginning, look for text between code blocks
+        log::info!("No explanation found at beginning, looking between code blocks");
+        
+        let mut i = 0;
+        let mut in_code_block = false;
+        let mut between_blocks_text = Vec::new();
+        
+        while i < lines.len() {
+            let line = lines[i].trim();
+            
+            if line.starts_with("```") {
+                in_code_block = !in_code_block;
+                
+                // If we just ended a code block, start collecting text
+                if !in_code_block {
+                    let mut j = i + 1;
+                    let mut block_text = Vec::new();
+                    
+                    // Collect lines until the next code block or file marker
+                    while j < lines.len() {
+                        let next_line = lines[j].trim();
+                        if next_line.starts_with("```") || 
+                           next_line.starts_with("File:") || 
+                           next_line.starts_with("file:") {
+                            break;
+                        }
+                        
+                        if !next_line.is_empty() {
+                            block_text.push(lines[j]);
+                        }
+                        j += 1;
+                    }
+                    
+                    // If we found text, add it to our collection
+                    if !block_text.is_empty() {
+                        between_blocks_text.extend(block_text);
+                    }
+                }
+            }
+            
+            i += 1;
+        }
+        
+        // If we found text between code blocks, return it
+        if !between_blocks_text.is_empty() {
+            let result = between_blocks_text.join("\n");
+            log::info!("Extracted explanation between code blocks, length: {}", result.len());
+            Some(result)
+        } else {
+            log::info!("No explanation found in response");
+            None
+        }
     }
 }
 
-/// Process the response from the LLM
+/// Process a response from the API
 pub async fn process_response(
     response: String,
     original_content: &str,
@@ -317,10 +442,10 @@ pub async fn process_response(
     // Extract explanation text
     let explanation_text = extract_explanation_text(&response);
     
-    // Calculate diff
+    // Calculate the diff between the original and modified code
     let changes = calculate_diff(original_content, &code);
     
-    // Create FileDiff
+    // Create a FileDiff struct
     let diff = crate::app::FileDiff {
         original: original_content.to_string(),
         modified: code,
@@ -336,41 +461,99 @@ pub async fn process_multi_file_response(
     response: String,
     files_content: &[(PathBuf, String)],
 ) -> Result<Vec<(String, crate::app::FileDiff)>> {
-    // Extract explanation text first (before we process code blocks)
+    // Extract files from the response
+    let files = extract_multiple_files_from_response(&response);
+    
+    // Log the extracted files for debugging
+    log::info!("Extracted {} files from response", files.len());
+    for (file_name, content) in &files {
+        log::info!("  - {} (content length: {})", file_name, content.len());
+    }
+    
+    // Log the available files for matching
+    log::info!("Available files for matching: {}", files_content.len());
+    for (path, _) in files_content {
+        log::info!("  - {:?}", path);
+    }
+    
+    // Extract explanation text (common for all files)
     let explanation_text = extract_explanation_text(&response);
+    if let Some(ref exp) = explanation_text {
+        log::info!("Extracted explanation text (length: {})", exp.len());
+    } else {
+        log::info!("No explanation text extracted");
+    }
     
-    // Extract multiple files from the response
-    let files = process_multi_file_response_internal(&response);
+    let mut result = Vec::new();
     
-    let mut results = Vec::new();
-    
-    for (file_name, code) in files {
-        // Find the original content for this file
+    // Process each file
+    for (file_name, file_content) in files {
+        // Find the original content for this file using various matching strategies
+        let normalized_name = if file_name.starts_with("./") {
+            file_name[2..].to_string()
+        } else {
+            file_name.clone()
+        };
+        
+        let basename = Path::new(&normalized_name)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| normalized_name.clone());
+            
+        // Try multiple matching strategies
         let original_content = files_content
             .iter()
             .find(|(path, _)| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string() == file_name)
-                    .unwrap_or(false)
+                let path_str = path.to_string_lossy().to_string();
+                
+                // Exact path match
+                if path_str == normalized_name {
+                    log::info!("Found exact path match for {}: {:?}", file_name, path);
+                    return true;
+                }
+                
+                // Path ends with the filename
+                if path_str.ends_with(&normalized_name) || 
+                   path_str.ends_with(&format!("/{}", normalized_name)) {
+                    log::info!("Found path ending with {} for {}: {:?}", normalized_name, file_name, path);
+                    return true;
+                }
+                
+                // Basename match
+                if let Some(name) = path.file_name() {
+                    if name.to_string_lossy() == basename {
+                        log::info!("Found basename match ({}) for {}: {:?}", basename, file_name, path);
+                        return true;
+                    }
+                }
+                
+                false
             })
             .map(|(_, content)| content.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                // Log that we couldn't find the original content
+                log::warn!("Original content not found for file: {}, using empty string", file_name);
+                String::new()
+            });
         
-        // Calculate diff
-        let changes = calculate_diff(&original_content, &code);
+        log::info!("File: {}, Original content length: {}, Modified content length: {}", 
+                  file_name, original_content.len(), file_content.len());
         
-        // Create FileDiff
+        // Calculate the diff
+        let changes = calculate_diff(&original_content, &file_content);
+        
+        // Create a FileDiff struct
         let diff = crate::app::FileDiff {
             original: original_content,
-            modified: code,
+            modified: file_content,
             changes,
             explanation_text: explanation_text.clone(),
         };
         
-        results.push((file_name, diff));
+        result.push((file_name, diff));
     }
     
-    Ok(results)
+    Ok(result)
 }
 
 /// Get the programming language from a file extension
@@ -593,6 +776,7 @@ pub async fn fetch_openrouter_credits(api_key: &str) -> Result<crate::app::Credi
     // Check if the request was successful
     if !response.status().is_success() {
         let error_text = response.text().await?;
+        error!("Failed to fetch credits: {}", error_text);
         return Err(anyhow::anyhow!("Failed to fetch credits: {}", error_text));
     }
     
@@ -730,5 +914,14 @@ fn extract_file_name(line: &str) -> String {
     } else {
         // Default case if we can't extract a proper file name
         "unknown_file".to_string()
+    }
+}
+
+/// Model specific temperature settings
+fn get_model_temperature(model: &str) -> f32 {
+    match model {
+        m if m.contains("gemini") => 0.7, // Gemini models work better with slightly lower temp
+        m if m.contains("claude") => 0.7, // Claude models work well with moderate temperature
+        _ => 0.7, // Default for other models
     }
 } 

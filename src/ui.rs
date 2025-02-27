@@ -1,9 +1,19 @@
-use crate::app::{App, AppMode, ActivePanel, MessageType, ProcessingState};
+use crate::app::{App, AppMode, MessageType, ProcessingState};
 use std::path::Path;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Clear},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    layout::{Layout, Constraint, Direction, Alignment, Rect},
+    Frame,
+    backend::CrosstermBackend,
+    Terminal,
+};
+use anyhow::Result;
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
 // Color theme
@@ -849,219 +859,139 @@ pub fn render_spinner_overlay(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(spinner_text, spinner_area);
 }
 
-/// Renders the results screen with diff
-fn render_results(f: &mut Frame, app: &App, area: Rect) {
-    // Split the screen into sections
-    let main_chunks = Layout::default()
+/// Render the results view
+pub fn render_results(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Title
-            Constraint::Min(1),     // Diff panels or explanation
-        ].as_ref())
-        .margin(1)
+            Constraint::Length(3), // Title
+            Constraint::Min(5),    // Content
+            Constraint::Length(3), // Help
+        ])
         .split(area);
-    
-    // Title with file information if available
-    let title_text = if let Some(file_name) = &app.current_diff_file {
-        // For multi-file diffs, show which file we're viewing
-        if let Some(diffs) = &app.multi_file_diffs {
-            if diffs.len() > 1 {
-                if let Some(idx) = diffs.iter().position(|(name, _)| name == file_name) {
-                    format!("Review Changes - File {} of {}: {}", idx + 1, diffs.len(), file_name)
-                } else {
-                    format!("Review Changes - {}", file_name)
-                }
-            } else {
-                format!("Review Changes - {}", file_name)
-            }
-        } else {
-            format!("Review Changes - {}", file_name)
-        }
+
+    // Render title
+    let title = if let Some(ref file_name) = app.current_diff_file {
+        format!(" Diff for {} ", file_name)
     } else {
-        "Review Changes".to_string()
+        " Diff ".to_string()
     };
     
-    let title = Paragraph::new(title_text)
-        .block(Block::default().borders(Borders::ALL))
+    let title_block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .style(Style::default().fg(PRIMARY_COLOR));
-    f.render_widget(title, main_chunks[0]);
-    
-    // Check if we should show explanation text
-    if app.show_explanation && app.explanation_text.is_some() {
-        render_explanation_panel(f, app, main_chunks[1]);
-    } else {
-        // Split the main area into two panels for code diff
-        let diff_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ].as_ref())
-            .split(main_chunks[1]);
-        
-        if let Some(diff) = &app.current_diff {
-            // Original code panel
-            render_original_panel(f, app, diff, diff_chunks[0]);
-            
-            // Modified code panel
-            render_modified_panel(f, app, diff, diff_chunks[1]);
+    f.render_widget(title_block, chunks[0]);
+
+    // Render content
+    if app.show_explanation {
+        // Show explanation text if available
+        let explanation_text = if let Some(ref diff) = app.current_diff {
+            diff.explanation_text.as_deref().unwrap_or("No explanation available.")
+        } else if let Some(ref explanation) = app.explanation_text {
+            explanation
         } else {
-            // If no diff is available, show a message
-            let no_diff_text = Paragraph::new("No changes to display")
-                .block(Block::default().borders(Borders::ALL))
-                .style(Style::default().fg(Color::Red))
-                .alignment(Alignment::Center);
-            
-            f.render_widget(no_diff_text, main_chunks[1]);
-        }
-    }
-}
-
-/// Renders the explanation panel
-fn render_explanation_panel(f: &mut Frame, app: &App, area: Rect) {
-    if let Some(explanation) = &app.explanation_text {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(PRIMARY_COLOR))
-            .title("AI Explanation");
-        
-        let inner_area = block.inner(area);
-        
-        // Format the explanation text
-        let mut formatted_text = Vec::new();
-        for line in explanation.lines() {
-            formatted_text.push(Line::from(line));
-        }
-        
-        let explanation_paragraph = Paragraph::new(formatted_text)
-            .block(Block::default())
-            .wrap(Wrap { trim: true })
-            .scroll((app.scroll_position as u16, 0));
-        
-        f.render_widget(block, area);
-        f.render_widget(explanation_paragraph, inner_area);
-    } else {
-        // If no explanation is available, show a message
-        let no_explanation_text = Paragraph::new("No explanation available for this change")
-            .block(Block::default().borders(Borders::ALL).title("AI Explanation"))
-            .style(Style::default().fg(Color::Yellow))
-            .alignment(Alignment::Center);
-        
-        f.render_widget(no_explanation_text, area);
-    }
-}
-
-/// Renders the original code panel
-fn render_original_panel(
-    f: &mut Frame,
-    app: &App,
-    diff: &crate::app::FileDiff,
-    area: Rect,
-) {
-    // Split the area into header and body
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
-        .split(area);
-
-    // Create header
-    let header = Paragraph::new("Original Code")
-        .style(Style::default().fg(PRIMARY_COLOR))
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, chunks[0]);
-
-    // Create styled text for original code
-    let mut text = Text::default();
-    let original_lines: Vec<&str> = diff.original.lines().collect();
-    
-    for (i, line) in original_lines.iter().enumerate() {
-        // Check if this line is affected by a change
-        let style = if diff.changes.iter().any(|change| change.line_number == i + 1) {
-            Style::default().fg(ERROR_COLOR)
-        } else {
-            Style::default()
+            "No explanation available."
         };
         
-        text.lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:4} ", i + 1),
-                Style::default().fg(SECONDARY_COLOR)
-            ),
-            Span::styled(line.to_string(), style),
-        ]));
-    }
-
-    // Create the code paragraph with scrolling
-    let code_paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
-        .scroll((app.scroll_position as u16, 0))
-        .style(
-            if app.active_panel == ActivePanel::Left {
-                Style::default().bg(BG_COLOR)
-            } else {
-                Style::default()
-            }
-        );
-    
-    f.render_widget(code_paragraph, chunks[1]);
-}
-
-/// Renders the modified code panel
-fn render_modified_panel(
-    f: &mut Frame,
-    app: &App,
-    diff: &crate::app::FileDiff,
-    area: Rect,
-) {
-    // Split the area into header and body
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)].as_ref())
-        .split(area);
-
-    // Create header
-    let header = Paragraph::new("Modified Code")
-        .style(Style::default().fg(PRIMARY_COLOR))
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(header, chunks[0]);
-
-    // Create styled text for modified code with highlighted changes
-    let mut text = Text::default();
-    let modified_lines: Vec<&str> = diff.modified.lines().collect();
-    
-    for (i, line) in modified_lines.iter().enumerate() {
-        // Determine the style based on change type
-        let style = diff.changes.iter()
-            .find(|change| change.line_number == i + 1)
-            .map(|change| match change.change_type {
-                crate::app::ChangeType::Insert => Style::default().fg(SUCCESS_COLOR),
-                crate::app::ChangeType::Delete => Style::default().fg(ERROR_COLOR),
-                crate::app::ChangeType::Modify => Style::default().fg(ACCENT_COLOR),
-            })
-            .unwrap_or_else(|| Style::default());
+        let explanation_paragraph = Paragraph::new(explanation_text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(" Explanation ")
+                .style(Style::default().fg(PRIMARY_COLOR)))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: true });
         
-        text.lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:4} ", i + 1),
-                Style::default().fg(SECONDARY_COLOR)
-            ),
-            Span::styled(line.to_string(), style),
-        ]));
+        f.render_widget(explanation_paragraph, chunks[1]);
+    } else {
+        // Show diff view
+        let diff_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
+
+        if let Some(ref diff) = app.current_diff {
+            // Original code panel
+            let original_title = match app.active_panel {
+                crate::app::ActivePanel::Left => " Original (ACTIVE) ",
+                _ => " Original ",
+            };
+            
+            let original_block = Block::default()
+                .title(original_title)
+                .borders(Borders::ALL)
+                .border_type(if app.active_panel == crate::app::ActivePanel::Left {
+                    BorderType::Double
+                } else {
+                    BorderType::Rounded
+                })
+                .style(Style::default().fg(if app.active_panel == crate::app::ActivePanel::Left {
+                    SECONDARY_COLOR
+                } else {
+                    PRIMARY_COLOR
+                }));
+            
+            let original_text = Paragraph::new(diff.original.clone())
+                .block(original_block)
+                .style(Style::default().fg(Color::White))
+                .scroll((app.scroll_position as u16, 0));
+            
+            f.render_widget(original_text, diff_chunks[0]);
+
+            // Modified code panel
+            let modified_title = match app.active_panel {
+                crate::app::ActivePanel::Right => " Modified (ACTIVE) ",
+                _ => " Modified ",
+            };
+            
+            let modified_block = Block::default()
+                .title(modified_title)
+                .borders(Borders::ALL)
+                .border_type(if app.active_panel == crate::app::ActivePanel::Right {
+                    BorderType::Double
+                } else {
+                    BorderType::Rounded
+                })
+                .style(Style::default().fg(if app.active_panel == crate::app::ActivePanel::Right {
+                    SECONDARY_COLOR
+                } else {
+                    PRIMARY_COLOR
+                }));
+            
+            let modified_text = Paragraph::new(diff.modified.clone())
+                .block(modified_block)
+                .style(Style::default().fg(Color::White))
+                .scroll((app.scroll_position as u16, 0));
+            
+            f.render_widget(modified_text, diff_chunks[1]);
+        } else {
+            // No diff available
+            let no_diff_block = Block::default()
+                .title(" No Diff Available ")
+                .borders(Borders::ALL)
+                .style(Style::default().fg(PRIMARY_COLOR));
+            
+            f.render_widget(no_diff_block, chunks[1]);
+        }
     }
 
-    // Create the code paragraph with scrolling
-    let code_paragraph = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
-        .scroll((app.scroll_position as u16, 0))
-        .style(
-            if app.active_panel == ActivePanel::Right {
-                Style::default().bg(BG_COLOR)
-            } else {
-                Style::default()
-            }
-        );
+    // Render help
+    let help_text = if app.show_explanation {
+        "Press [e] to show diff | [q] to quit | [y] to accept | [n] to reject"
+    } else {
+        "Press [e] to show explanation | [Tab] to switch panels | [←/→] to navigate files | [↑/↓] to scroll | [y] to accept | [n] to reject | [q] to quit"
+    };
     
-    f.render_widget(code_paragraph, chunks[1]);
+    let help_paragraph = Paragraph::new(help_text)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(" Help ")
+            .style(Style::default().fg(PRIMARY_COLOR)))
+        .style(Style::default().fg(SECONDARY_COLOR))
+        .alignment(Alignment::Center);
+    
+    f.render_widget(help_paragraph, chunks[2]);
 }
 
 /// Renders the help screen
@@ -1107,9 +1037,9 @@ fn render_help(f: &mut Frame, _app: &App, _area: Rect) {
         Line::from("  [Y] - Apply changes"),
         Line::from("  [N] - Discard changes"),
         Line::from("  [E] - Toggle between explanation text and code diff"),
-        Line::from("  [Tab] - Switch between original and modified code (when viewing diff)"),
+        Line::from("  [←/→] - Switch between original and modified code panels"),
+        Line::from("  [Tab/Shift+Tab] - Navigate between files (for multi-file changes)"),
         Line::from("  [↑/↓] - Scroll through code or explanation"),
-        Line::from("  [←/→] - Navigate between files (for multi-file changes)"),
         Line::from(""),
         Line::from(vec![Span::styled("Multi-File Context:", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD))]),
         Line::from("  Use [S] in editor mode to select files for context"),
@@ -1226,7 +1156,7 @@ fn render_spinner(f: &mut Frame, app: &App, area: Rect) {
         height: 3,
     };
     
-    let spinner_text = format!("{} Processing request...", spinner);
+    let spinner_text = format!("{} Cooking...", spinner);
     let spinner_widget = Paragraph::new(spinner_text)
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().fg(HIGHLIGHT_COLOR))
@@ -1340,7 +1270,7 @@ fn render_command_bar(f: &mut Frame, app: &App, area: Rect) {
         AppMode::PromptInput => "Enter: Submit | Esc: Cancel",
         AppMode::Results => {
             if app.multi_file_diffs.is_some() {
-                "y: Apply All Changes | n: Discard | Left/Right: Navigate Files | e: Toggle Explanation | q: Back"
+                "y: Apply All Changes | n: Discard | Left/Right: Switch Panels | Tab: Next File | e: Toggle Explanation | q: Back"
             } else {
                 "y: Apply Changes | n: Discard | e: Toggle Explanation | q: Back"
             }
