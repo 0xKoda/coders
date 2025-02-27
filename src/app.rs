@@ -246,65 +246,63 @@ impl App {
         
         match key.code {
             KeyCode::Char('q') => {
-                // Return to welcome screen if pressed q
                 self.mode = AppMode::Welcome;
-            }
+            },
+            KeyCode::Up => {
+                // Get the index of the currently selected model
+                let current_idx = self.available_models.iter().position(|m| m == &self.selected_model)
+                    .unwrap_or(0);
+                
+                // Move up in the list (with wraparound)
+                if current_idx > 0 {
+                    self.selected_model = self.available_models[current_idx - 1].clone();
+                } else {
+                    self.selected_model = self.available_models[self.available_models.len() - 1].clone();
+                }
+            },
+            KeyCode::Down => {
+                // Get the index of the currently selected model
+                let current_idx = self.available_models.iter().position(|m| m == &self.selected_model)
+                    .unwrap_or(0);
+                
+                // Move down in the list (with wraparound)
+                if current_idx < self.available_models.len() - 1 {
+                    self.selected_model = self.available_models[current_idx + 1].clone();
+                } else {
+                    self.selected_model = self.available_models[0].clone();
+                }
+            },
             KeyCode::Enter => {
-                // If selected model is "custom", check if custom model is provided
-                if self.selected_model == "custom" && !self.custom_model.is_empty() {
-                    self.selected_model = self.custom_model.clone();
+                // If "custom" is selected, go to custom model input
+                if self.selected_model == "custom" {
+                    self.mode = AppMode::CustomModelInput;
+                    self.current_prompt = self.custom_model.clone();
+                    return Ok(());
                 }
                 
-                // If API key is configured, proceed to file browser
+                // If API key is set, save the selected model and proceed
                 if self.api_key.is_some() {
-                    // Save the selected model and API key to config
-                    if let Some(api_key) = &self.api_key {
-                        crate::config::save_api_key(api_key)?;
-                        crate::config::save_preferred_model(&self.selected_model)?;
+                    // Save the selected model to config
+                    if let Some(config_dir) = dirs::config_dir() {
+                        let config_file = config_dir.join("code_ai_preferred_model.txt");
+                        std::fs::write(config_file, &self.selected_model)?;
+                        self.set_success_message(&format!("Model set to {}", self.selected_model));
                     }
                     
-                    // Refresh file list and switch to file browser
-                    self.refresh_file_list()?;
+                    // Proceed to file browser
                     self.mode = AppMode::FileBrowser;
+                    self.refresh_file_list()?;
                 } else {
-                    // If no API key, switch to API key input mode
-                    self.current_prompt = String::new(); // Use current_prompt for API key input
+                    // If no API key, prompt for it
                     self.mode = AppMode::ApiKeyInput;
+                    self.current_prompt = String::new();
                 }
-            }
-            KeyCode::Tab => {
-                // Toggle focus between API key and model selection
-                // For now, we'll just handle model selection
-                // API key input will be handled through a separate mode
-            }
-            KeyCode::Up => {
-                // Navigate model selection upward
-                if let Some(idx) = self.available_models.iter().position(|m| m == &self.selected_model) {
-                    if idx > 0 {
-                        self.selected_model = self.available_models[idx - 1].clone();
-                    }
-                }
-            }
-            KeyCode::Down => {
-                // Navigate model selection downward
-                if let Some(idx) = self.available_models.iter().position(|m| m == &self.selected_model) {
-                    if idx < self.available_models.len() - 1 {
-                        self.selected_model = self.available_models[idx + 1].clone();
-                    }
-                }
-            }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+C to enter custom model input
-                if self.selected_model == "custom" {
-                    self.current_prompt = self.custom_model.clone();
-                    self.mode = AppMode::CustomModelInput;
-                }
-            }
+            },
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Ctrl+A to add API key - switch to API key input mode
-                self.current_prompt = String::new(); // Use current_prompt for API key input
+                // Ctrl+A to set API key
                 self.mode = AppMode::ApiKeyInput;
-            }
+                self.current_prompt = self.api_key.clone().unwrap_or_default();
+            },
             _ => {}
         }
         
@@ -409,7 +407,7 @@ impl App {
             }
             KeyCode::Char('c') => {
                 // View credits information
-                if self.api_key.is_some() {
+                if let Some(_api_key) = &self.api_key {
                     self.mode = AppMode::Credits;
                     self.fetch_credits_info();
                 } else {
@@ -1408,8 +1406,15 @@ impl App {
                 // Save the custom model if it's not empty
                 if !self.current_prompt.is_empty() {
                     self.custom_model = self.current_prompt.clone();
-                    self.message = Some("Custom model configured successfully".to_string());
+                    // Set the selected model to the custom model value
+                    self.selected_model = self.current_prompt.clone();
+                    self.message = Some("Custom model configured and selected".to_string());
                     self.message_type = MessageType::Success;
+                    
+                    // Save to config
+                    if let Some(api_key) = &self.api_key {
+                        crate::config::save_preferred_model(&self.selected_model)?;
+                    }
                 }
                 
                 // Return to configuration screen

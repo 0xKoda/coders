@@ -93,98 +93,91 @@ pub fn render_welcome(f: &mut Frame, _app: &App, area: Rect) {
 }
 
 /// Renders the configuration screen
-pub fn render_config(f: &mut Frame, app: &App, _area: Rect) {
-    let size = f.size();
-    
-    // Create a block for the configuration screen
-    let block = Block::default()
-        .title("Configuration")
-        .borders(Borders::ALL);
-    
-    // Create a layout for the configuration options
+pub fn render_config(f: &mut Frame, app: &App, area: Rect) {
+    // Split the area into sections
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(2)
         .constraints([
             Constraint::Length(3),  // Title
-            Constraint::Length(3),  // API Key status
+            Constraint::Length(3),  // API Key
             Constraint::Length(1),  // Spacer
             Constraint::Length(2),  // Model selection title
-            Constraint::Min(10),    // Model options
+            Constraint::Min(5),     // Model selection list
             Constraint::Length(3),  // Instructions
         ])
-        .split(size);
+        .split(area);
     
-    // Render title
-    let title = Paragraph::new("Configure your OpenRouter API key and model")
-        .style(Style::default().fg(Color::Cyan))
+    // Title
+    let title = Paragraph::new("Configuration")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
     
-    // Render API key status
-    let api_key_status = match &app.api_key {
-        Some(_) => "API Key: Configured ✓",
-        None => "API Key: Not configured ✗",
+    // API Key
+    let api_key_text = if let Some(key) = &app.api_key {
+        format!("API Key: {}", mask_api_key(key))
+    } else {
+        "API Key: Not configured".to_string()
     };
     
-    let api_key_paragraph = Paragraph::new(api_key_status)
-        .style(
-            Style::default().fg(
-                if app.api_key.is_some() {
-                    Color::Green
-                } else {
-                    Color::Red
-                }
-            )
-        );
-    f.render_widget(api_key_paragraph, chunks[1]);
+    let api_key = Paragraph::new(api_key_text)
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL).title("API Key"));
+    f.render_widget(api_key, chunks[1]);
     
-    // Render model selection title
+    // Model selection title
     let model_title = Paragraph::new("Select a model:")
-        .style(Style::default().fg(Color::Cyan));
+        .style(Style::default().fg(Color::White));
     f.render_widget(model_title, chunks[3]);
     
-    // Render model options
-    let model_options: Vec<ListItem> = app.available_models
+    // Model selection list
+    let models: Vec<ListItem> = app.available_models
         .iter()
-        .map(|model| {
-            let content = if model == "custom" {
-                if !app.custom_model.is_empty() {
-                    format!("Custom: {}", app.custom_model)
+        .map(|m| {
+            let display_name = if m == "custom" {
+                if app.custom_model.is_empty() {
+                    "Custom model (not set)".to_string()
                 } else {
-                    "Custom model (press Ctrl+C to configure)".to_string()
+                    format!("Custom model: {}", app.custom_model)
                 }
             } else {
-                model.clone()
+                m.clone()
             };
             
-            let style = if model == &app.selected_model {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            let style = if m == &app.selected_model || 
+                        (m == "custom" && app.selected_model == app.custom_model && !app.custom_model.is_empty()) {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(Color::White)
             };
             
-            ListItem::new(content).style(style)
+            ListItem::new(display_name).style(style)
         })
         .collect();
     
-    let model_list = List::new(model_options)
-        .block(Block::default().borders(Borders::NONE))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+    let models_list = List::new(models)
+        .block(Block::default().borders(Borders::ALL).title("Available Models"))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_widget(models_list, chunks[4]);
     
-    f.render_widget(model_list, chunks[4]);
+    // Instructions
+    let instructions = if app.api_key.is_some() {
+        "Press Enter to continue, q to go back, Ctrl+A to change API key"
+    } else {
+        "Press Enter to set API key, q to go back"
+    };
     
-    // Render instructions
-    let instructions = Paragraph::new(
-        "Press Enter to continue | Ctrl+A to set API key | Up/Down to select model | Ctrl+C to set custom model"
-    )
-    .style(Style::default().fg(Color::Gray))
-    .alignment(Alignment::Center);
-    f.render_widget(instructions, chunks[5]);
+    // Add custom model instructions if "custom" is selected
+    let instructions = if app.selected_model == "custom" {
+        "Press Enter to input custom model, q to go back"
+    } else {
+        instructions
+    };
     
-    // Render the main block
-    f.render_widget(block, size);
+    let instructions_widget = Paragraph::new(instructions)
+        .style(Style::default().fg(Color::Yellow))
+        .alignment(Alignment::Center);
+    f.render_widget(instructions_widget, chunks[5]);
 }
 
 /// Renders the API key input screen
@@ -1195,6 +1188,18 @@ fn get_file_language(file_path: &Path) -> &'static str {
     }
 }
 
+/// Mask API key for display, showing only first 4 and last 4 characters
+fn mask_api_key(key: &str) -> String {
+    if key.len() <= 8 {
+        return "****".to_string();
+    }
+    
+    let visible_chars = 4;
+    let first = &key[0..visible_chars];
+    let last = &key[key.len() - visible_chars..];
+    format!("{}****{}", first, last)
+}
+
 /// Render the status bar
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let status_text = format!(
@@ -1326,7 +1331,7 @@ fn render_credits_screen(f: &mut Frame, app: &App, area: Rect) {
 fn render_command_bar(f: &mut Frame, app: &App, area: Rect) {
     let command_text = match app.mode {
         AppMode::Welcome => "Enter: Continue | q: Quit",
-        AppMode::Configuration => "Enter: Continue | Ctrl+A: Set API Key | Ctrl+C: Set Custom Model | q: Back",
+        AppMode::Configuration => "Enter: Continue | Ctrl+A: Set API Key | q: Back",
         AppMode::ApiKeyInput => "Enter: Save API Key | Esc: Cancel",
         AppMode::CustomModelInput => "Enter: Save Custom Model | Esc: Cancel",
         AppMode::FileBrowser => "Enter: Open | Backspace/b: Up | s: Select | m: Multi-select | p: Prompt | h: Help | q: Back",
