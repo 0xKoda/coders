@@ -2,6 +2,9 @@
 .DS_Store
 Cargo.lock
 deps.md
+index.js
 main.js
 sample.rs
 index.html
+*.MDC
+todo.md
