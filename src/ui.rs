@@ -51,7 +51,7 @@ pub fn render(f: &mut Frame, app: &App) {
         AppMode::PromptInput => render_prompt_input(f, app, chunks[1]),
         AppMode::Results => render_results(f, app, chunks[1]),
         AppMode::Help => render_help(f, app, chunks[1]),
-        AppMode::Credits => render_credits(f, app, chunks[1]),
+        AppMode::Credits => render_credits_screen(f, app, chunks[1]),
     }
     
     // Render message bar if there's a message
@@ -61,6 +61,11 @@ pub fn render(f: &mut Frame, app: &App) {
     
     // Render command bar
     render_command_bar(f, app, chunks[3]);
+    
+    // Render credits overlay if enabled (regardless of the current mode)
+    if app.show_credits && app.mode != AppMode::Credits {
+        render_credits(f, app, f.size());
+    }
 }
 
 /// Render the welcome screen

@@ -387,6 +387,16 @@ impl App {
                     self.set_error_message("No files selected. Use 's' to select files first.");
                 }
             }
+            KeyCode::Char('c') => {
+                // Toggle credits display
+                self.show_credits = !self.show_credits;
+                self.message = Some(format!("Credits display {}", if self.show_credits { "enabled" } else { "disabled" }));
+                
+                // If enabling credits and we don't have credits info yet, fetch it
+                if self.show_credits && self.credits_info.is_none() {
+                    self.fetch_credits();
+                }
+            }
             KeyCode::Char('l') => {
                 // List all selected files
                 if self.selected_files.is_empty() {
