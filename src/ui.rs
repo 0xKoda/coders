@@ -3,7 +3,7 @@ use std::path::Path;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap, Gauge, ListState},
     layout::{Layout, Constraint, Direction, Alignment, Rect},
     Frame,
     backend::CrosstermBackend,
@@ -372,6 +372,7 @@ fn render_file_selection(f: &mut Frame, app: &App, _area: Rect) {
             Constraint::Length(3),  // Title with current directory
             Constraint::Min(1),     // File list
             Constraint::Length(5),  // Selected files
+            Constraint::Length(3),  // Token count progress bar
             Constraint::Length(3),  // Instructions
         ].as_ref())
         .split(area);
@@ -400,69 +401,106 @@ fn render_file_selection(f: &mut Frame, app: &App, _area: Rect) {
                     .unwrap_or_else(|| "[Unknown]".to_string())
             };
             
-            let display_name = if is_dir {
-                format!("📁 {}/", name)
-            } else if is_file_selected {
-                format!("✓ 📄 {}", name)
+            let prefix = if is_dir {
+                "📁 "
             } else {
-                format!("📄 {}", name)
+                "📄 "
             };
             
             let style = if is_selected {
-                Style::default().fg(HIGHLIGHT_COLOR).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Black).bg(PRIMARY_COLOR)
             } else if is_file_selected {
-                Style::default().fg(SUCCESS_COLOR)
-            } else if is_dir {
-                Style::default().fg(SECONDARY_COLOR)
+                Style::default().fg(Color::Green)
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
             
-            ListItem::new(Line::from(Span::styled(display_name, style)))
+            ListItem::new(format!("{}{}", prefix, name)).style(style)
         })
         .collect();
     
-    let files_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Files (Space to select)"))
-        .highlight_style(Style::default().fg(HIGHLIGHT_COLOR).add_modifier(Modifier::BOLD));
+    let file_list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Files "))
+        .highlight_style(Style::default().fg(Color::Black).bg(PRIMARY_COLOR));
     
-    f.render_widget(files_list, chunks[1]);
+    f.render_stateful_widget(file_list, chunks[1], &mut ListState::default().with_selected(Some(app.selected_file_idx)));
     
     // Selected files
     let selected_files_text = if app.selected_files.is_empty() {
-        vec![Line::from(Span::styled(
-            "No files selected. Use spacebar to select files.",
-            Style::default().fg(ERROR_COLOR)
-        ))]
+        vec![
+            Line::from("No files selected for context"),
+        ]
     } else {
-        let mut lines = vec![Line::from(Span::styled(
-            format!("{} files selected:", app.selected_files.len()),
-            Style::default().fg(SUCCESS_COLOR).add_modifier(Modifier::BOLD)
-        ))];
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} files selected for context:", app.selected_files.len()),
+                    Style::default().fg(Color::Green)
+                ),
+            ]),
+        ];
         
-        for path in &app.selected_files {
-            if let Some(file_name) = path.file_name() {
-                lines.push(Line::from(Span::styled(
-                    format!("- {}", file_name.to_string_lossy()),
-                    Style::default().fg(ACCENT_COLOR)
-                )));
-            }
+        for (i, path) in app.selected_files.iter().take(3).enumerate() {
+            let file_name = path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "[Unknown]".to_string());
+            
+            lines.push(Line::from(format!("  {}. {}", i + 1, file_name)));
+        }
+        
+        if app.selected_files.len() > 3 {
+            lines.push(Line::from(
+                format!("  ... and {} more", app.selected_files.len() - 3),
+            ));
         }
         
         lines
     };
     
     let selected_files = Paragraph::new(selected_files_text)
-        .block(Block::default().borders(Borders::ALL).title("Selected Files"))
-        .style(Style::default().fg(Color::White));
+        .block(Block::default().borders(Borders::ALL).title(" Selected Files "))
+        .wrap(Wrap { trim: true });
     
     f.render_widget(selected_files, chunks[2]);
     
+    // Token count progress bar
+    let token_percentage = if app.context_window_size > 0 {
+        (app.token_count as f64 / app.context_window_size as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    
+    let token_count_text = format!(
+        "Context usage: {}/{} tokens ({:.1}%)",
+        app.token_count,
+        app.context_window_size,
+        token_percentage
+    );
+    
+    let progress_color = if token_percentage < 50.0 {
+        Color::Green
+    } else if token_percentage < 80.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(" Context Window Usage "))
+        .gauge_style(Style::default().fg(progress_color))
+        .ratio(token_percentage / 100.0)
+        .label(token_count_text);
+    
+    f.render_widget(gauge, chunks[3]);
+    
     // Instructions
-    let instructions = Paragraph::new("[Space] Toggle selection | [Enter] Proceed to prompt | [Q] Cancel | [↑/↓] Navigate")
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(SECONDARY_COLOR));
-    f.render_widget(instructions, chunks[3]);
+    let instructions = Paragraph::new(
+        "↑/↓: Navigate | Enter: Open | Space: Select/Deselect | Esc: Back | p: Proceed with selected files"
+    )
+    .block(Block::default().borders(Borders::ALL))
+    .style(Style::default().fg(Color::Gray));
+    
+    f.render_widget(instructions, chunks[4]);
 }
 
 /// Renders the code editor
@@ -699,6 +737,7 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),      // Prompt input area
+            Constraint::Length(3),   // Token count progress bar
             Constraint::Length(3),   // Instructions
         ])
         .split(inner_area);
@@ -727,11 +766,8 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
         
         let text = vec![
             Line::from(vec![
-                Span::raw(""),
-            ]),
-            Line::from(vec![
                 Span::styled(format!(" {} {} ", spinner, cooking_message), 
-                             Style::default().fg(Color::Yellow)),
+                           Style::default().fg(Color::Yellow)),
             ]),
             Line::from(vec![
                 Span::raw(""),
@@ -739,36 +775,40 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
         ];
         
         let paragraph = Paragraph::new(text)
-            .block(Block::default())
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true });
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::NONE))
+            .alignment(Alignment::Center);
         
         f.render_widget(paragraph, chunks[0]);
-        
-        // Instructions for processing state
-        let instructions = Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("Please wait while your request is being processed...", 
-                             Style::default().fg(Color::Gray)),
-            ]),
-        ])
-        .alignment(Alignment::Center);
-        
-        f.render_widget(instructions, chunks[1]);
     } else {
-        // Regular prompt input
-        let prompt_text = app.current_prompt.as_str();
+        // Show the prompt input area
+        let prompt_text = if app.current_prompt.is_empty() {
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Enter your prompt here. Describe what you want to do with the code.",
+                        Style::default().fg(Color::DarkGray)
+                    ),
+                ]),
+            ]
+        } else {
+            // Split the prompt into lines for proper wrapping
+            app.current_prompt.lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect()
+        };
         
-        let paragraph = Paragraph::new(prompt_text)
-            .block(Block::default())
+        let prompt_paragraph = Paragraph::new(prompt_text)
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::NONE))
             .wrap(Wrap { trim: true });
         
-        f.render_widget(paragraph, chunks[0]);
+        f.render_widget(prompt_paragraph, chunks[0]);
         
         // Calculate cursor position
-        if app.mode == AppMode::PromptInput {
+        if app.mode == AppMode::PromptInput && app.processing_state == ProcessingState::Idle {
             // Count lines and characters to determine cursor position
-            let lines: Vec<&str> = prompt_text.split('\n').collect();
+            let lines: Vec<&str> = app.current_prompt.split('\n').collect();
             let line_count = lines.len();
             
             if line_count > 0 {
@@ -789,32 +829,52 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
                 f.set_cursor(chunks[0].x, chunks[0].y);
             }
         }
-        
-        // Instructions
-        let instructions = if !app.selected_files.is_empty() {
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("Enter your prompt with context from selected files. ", 
-                                Style::default().fg(Color::Gray)),
-                    Span::styled("Press Enter to submit, Esc to cancel", 
-                                Style::default().fg(Color::Yellow)),
-                ]),
-            ])
-        } else {
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled("Enter your prompt for the current file. ", 
-                                Style::default().fg(Color::Gray)),
-                    Span::styled("Press Enter to submit, Esc to cancel", 
-                                Style::default().fg(Color::Yellow)),
-                ]),
-            ])
-        };
-        
-        f.render_widget(instructions, chunks[1]);
     }
     
-    // Render the outer block last
+    // Token count progress bar
+    let token_percentage = if app.context_window_size > 0 {
+        (app.token_count as f64 / app.context_window_size as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    
+    let token_count_text = format!(
+        "Context usage: {}/{} tokens ({:.1}%)",
+        app.token_count,
+        app.context_window_size,
+        token_percentage
+    );
+    
+    let progress_color = if token_percentage < 50.0 {
+        Color::Green
+    } else if token_percentage < 80.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+    
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(" Context Window Usage "))
+        .gauge_style(Style::default().fg(progress_color))
+        .ratio(token_percentage / 100.0)
+        .label(token_count_text);
+    
+    f.render_widget(gauge, chunks[1]);
+    
+    // Instructions
+    let instructions = if !app.selected_files.is_empty() {
+        "Enter: Submit | Esc: Back to file selection"
+    } else {
+        "Enter: Submit | Esc: Back to editor"
+    };
+    
+    let instructions_paragraph = Paragraph::new(instructions)
+        .style(Style::default().fg(Color::Gray))
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    
+    f.render_widget(instructions_paragraph, chunks[2]);
+    
     f.render_widget(block, area);
 }
 

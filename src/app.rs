@@ -99,6 +99,10 @@ pub struct App {
     pub selected_files: Vec<PathBuf>,
     pub selected_files_content: Vec<(PathBuf, String)>,
     
+    // Token counting for context window
+    pub token_count: usize,
+    pub context_window_size: usize,
+    
     // Code editing
     pub current_file: Option<PathBuf>,
     pub current_file_content: String,
@@ -151,7 +155,7 @@ impl Default for App {
             active_panel: ActivePanel::Left,
             
             api_key: None,
-            selected_model: "anthropic/claude-3.7-sonnet:beta".to_string(),
+            selected_model: "google/gemini-2.0-flash-001".to_string(),
             available_models: vec![
                 "google/gemini-2.0-flash-001".to_string(),
                 "anthropic/claude-3.7-sonnet".to_string(),
@@ -165,6 +169,9 @@ impl Default for App {
             
             selected_files: Vec::new(),
             selected_files_content: Vec::new(),
+            
+            token_count: 0,
+            context_window_size: 0,
             
             current_file: None,
             current_file_content: String::new(),
@@ -198,7 +205,10 @@ impl Default for App {
 impl App {
     /// Create a new application instance
     pub fn new() -> Self {
-        Self::default()
+        let mut app = Self::default();
+        app.update_context_window_size();
+        app.update_token_count();
+        app
     }
     
     /// Handle key events based on current mode
@@ -259,6 +269,9 @@ impl App {
                 } else {
                     self.selected_model = self.available_models[self.available_models.len() - 1].clone();
                 }
+                
+                // Update context window size for the new model
+                self.update_context_window_size();
             },
             KeyCode::Down => {
                 // Get the index of the currently selected model
@@ -271,6 +284,9 @@ impl App {
                 } else {
                     self.selected_model = self.available_models[0].clone();
                 }
+                
+                // Update context window size for the new model
+                self.update_context_window_size();
             },
             KeyCode::Enter => {
                 // If "custom" is selected, go to custom model input
@@ -557,6 +573,8 @@ impl App {
                 }
                 // Clear the prompt when exiting
                 self.current_prompt = String::new();
+                // Update token count
+                self.update_token_count();
             }
             KeyCode::Enter => {
                 // Don't process empty prompts
@@ -706,12 +724,14 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
-                // Add character to prompt
                 self.current_prompt.push(c);
+                // Update token count
+                self.update_token_count();
             }
             KeyCode::Backspace => {
-                // Remove last character
                 self.current_prompt.pop();
+                // Update token count
+                self.update_token_count();
             }
             _ => {}
         }
@@ -1223,6 +1243,9 @@ impl App {
             }
             self.set_info_message(&format!("Removed {} from selection", 
                 file_path.file_name().unwrap_or_default().to_string_lossy()));
+            
+            // Update token count after removing a file
+            self.update_token_count();
         } else {
             // Add to selected files
             self.selected_files.push(file_path.clone());
@@ -1248,6 +1271,9 @@ impl App {
             self.set_success_message(&format!("Added {} to selection. Total: {}", 
                 file_path.file_name().unwrap_or_default().to_string_lossy(),
                 self.selected_files.len()));
+            
+            // Update token count after adding a file
+            self.update_token_count();
         }
     }
     
@@ -1405,17 +1431,22 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                // Cancel and return to editor mode
-                self.mode = AppMode::Editor;
-                self.current_prompt.clear();
+                // Go back to file selection
+                self.mode = AppMode::FileSelection;
+                // Clear the prompt
+                self.current_prompt = String::new();
+                // Update token count
+                self.update_token_count();
             }
             KeyCode::Char(c) => {
-                // Add character to prompt
                 self.current_prompt.push(c);
+                // Update token count
+                self.update_token_count();
             }
             KeyCode::Backspace => {
-                // Remove last character from prompt
                 self.current_prompt.pop();
+                // Update token count
+                self.update_token_count();
             }
             _ => {}
         }
@@ -1783,5 +1814,41 @@ impl App {
         info!("Active panel: {:?}", self.active_panel);
         info!("Scroll position: {}", self.scroll_position);
         info!("Show explanation: {}", self.show_explanation);
+    }
+
+    /// Update the context window size based on the selected model
+    pub fn update_context_window_size(&mut self) {
+        // Set context window size based on the selected model
+        // Currently only supporting Gemini Flash with 1M tokens
+        if self.selected_model.contains("gemini") {
+            self.context_window_size = 1_000_000; // 1M tokens for Gemini Flash
+        } else {
+            // Default to a conservative estimate for other models
+            self.context_window_size = 100_000;
+        }
+    }
+    
+    /// Count tokens in a string (simple approximation)
+    fn count_tokens(&self, text: &str) -> usize {
+        // Simple approximation: 1 token ≈ 4 characters for English text
+        // This is a rough estimate and not accurate for all languages or special tokens
+        let char_count = text.chars().count();
+        char_count / 4
+    }
+    
+    /// Update token count based on selected files and prompt
+    pub fn update_token_count(&mut self) {
+        let mut total_tokens = 0;
+        
+        // Count tokens in selected files
+        for (_, content) in &self.selected_files_content {
+            total_tokens += self.count_tokens(content);
+        }
+        
+        // Count tokens in the prompt
+        total_tokens += self.count_tokens(&self.current_prompt);
+        
+        // Update the token count
+        self.token_count = total_tokens;
     }
 }
