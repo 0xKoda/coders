@@ -1,6 +1,6 @@
 # Coders AI Assistant
 
-Coders is an AI-powered terminal user interface (TUI) tool that helps you create edit code with any LLM on [OpenRouter](https://openrouter.ai/models).
+Coders is an AI-powered terminal user interface (TUI) tool that helps you edit code with any LLM on [OpenRouter](https://openrouter.ai/models).
 
 ## Features
 
@@ -11,7 +11,7 @@ Coders is an AI-powered terminal user interface (TUI) tool that helps you create
 - **Multi-File Context**: Select multiple files to provide better context for AI prompts
 - **Side-by-Side Diff View**: Compare original and modified code before accepting changes
 - **Explanation Panel**: View AI explanations for each code change
-- **AST Generation**: Automatically generates an Abstract Syntax Tree for better code understanding
+- **Context Window Tracking**: Track the total prompt size and progress of the context window
 
 ![Coders AI Assistant](tui.png)
 
