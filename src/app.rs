@@ -99,10 +99,6 @@ pub struct App {
     pub selected_files: Vec<PathBuf>,
     pub selected_files_content: Vec<(PathBuf, String)>,
     
-    // Token counting for context window
-    pub token_count: usize,
-    pub context_window_size: usize,
-    
     // Code editing
     pub current_file: Option<PathBuf>,
     pub current_file_content: String,
@@ -137,6 +133,12 @@ pub struct App {
     
     /// Whether to show explanation text in results view
     pub show_explanation: bool,
+    
+    /// Token count for context window
+    pub token_count: usize,
+    
+    /// Context window size
+    pub context_window_size: usize,
 }
 
 /// Message type for status updates
@@ -155,7 +157,7 @@ impl Default for App {
             active_panel: ActivePanel::Left,
             
             api_key: None,
-            selected_model: "google/gemini-2.0-flash-001".to_string(),
+            selected_model: "anthropic/claude-3.7-sonnet:beta".to_string(),
             available_models: vec![
                 "google/gemini-2.0-flash-001".to_string(),
                 "anthropic/claude-3.7-sonnet".to_string(),
@@ -169,9 +171,6 @@ impl Default for App {
             
             selected_files: Vec::new(),
             selected_files_content: Vec::new(),
-            
-            token_count: 0,
-            context_window_size: 0,
             
             current_file: None,
             current_file_content: String::new(),
@@ -198,6 +197,10 @@ impl Default for App {
             message_timeout: Duration::from_secs(3),
             
             show_explanation: false,
+            
+            token_count: 0,
+            
+            context_window_size: 0,
         }
     }
 }
@@ -269,9 +272,6 @@ impl App {
                 } else {
                     self.selected_model = self.available_models[self.available_models.len() - 1].clone();
                 }
-                
-                // Update context window size for the new model
-                self.update_context_window_size();
             },
             KeyCode::Down => {
                 // Get the index of the currently selected model
@@ -284,9 +284,6 @@ impl App {
                 } else {
                     self.selected_model = self.available_models[0].clone();
                 }
-                
-                // Update context window size for the new model
-                self.update_context_window_size();
             },
             KeyCode::Enter => {
                 // If "custom" is selected, go to custom model input
@@ -401,16 +398,6 @@ impl App {
                                                self.selected_files.len()));
                 } else {
                     self.set_error_message("No files selected. Use 's' to select files first.");
-                }
-            }
-            KeyCode::Char('c') => {
-                // Toggle credits display
-                self.show_credits = !self.show_credits;
-                self.message = Some(format!("Credits display {}", if self.show_credits { "enabled" } else { "disabled" }));
-                
-                // If enabling credits and we don't have credits info yet, fetch it
-                if self.show_credits && self.credits_info.is_none() {
-                    self.fetch_credits();
                 }
             }
             KeyCode::Char('l') => {
@@ -562,6 +549,16 @@ impl App {
     
     fn handle_prompt_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         use crossterm::event::KeyCode;
+        
+        // If we're already processing, ignore most key presses
+        if self.processing_state == ProcessingState::Processing {
+            // Only allow Escape to cancel the processing
+            if key.code == KeyCode::Esc {
+                self.processing_state = ProcessingState::Idle;
+                self.set_info_message("Request cancelled");
+            }
+            return Ok(());
+        }
         
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -725,12 +722,12 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.current_prompt.push(c);
-                // Update token count
+                // Update token count immediately
                 self.update_token_count();
             }
             KeyCode::Backspace => {
                 self.current_prompt.pop();
-                // Update token count
+                // Update token count immediately
                 self.update_token_count();
             }
             _ => {}
@@ -1231,50 +1228,49 @@ impl App {
         }
     }
     
-    /// Toggle selection of a file for multi-file context
+    /// Toggle file selection for multi-file context
     pub fn toggle_file_selection(&mut self, file_path: PathBuf) {
         // Check if the file is already selected
-        if let Some(index) = self.selected_files.iter().position(|p| p == &file_path) {
-            // Remove from selected files
-            self.selected_files.remove(index);
-            // Also remove from content if it exists
-            if let Some(content_index) = self.selected_files_content.iter().position(|(p, _)| p == &file_path) {
-                self.selected_files_content.remove(content_index);
-            }
-            self.set_info_message(&format!("Removed {} from selection", 
-                file_path.file_name().unwrap_or_default().to_string_lossy()));
+        if let Some(idx) = self.selected_files.iter().position(|p| p == &file_path) {
+            // Remove the file from selected_files
+            self.selected_files.remove(idx);
             
-            // Update token count after removing a file
-            self.update_token_count();
+            // Remove the file content
+            self.selected_files_content.retain(|(path, _)| path != &file_path);
+            
+            // Set info message
+            if let Some(file_name) = file_path.file_name() {
+                self.set_info_message(&format!("Removed '{}' from selected files", file_name.to_string_lossy()));
+            }
         } else {
-            // Add to selected files
+            // Add the file to selected_files
             self.selected_files.push(file_path.clone());
             
-            // If this is the current file, use the current content in memory
-            let content = if Some(&file_path) == self.current_file.as_ref() {
-                self.current_file_content.clone()
-            } else {
-                // Otherwise read from disk
-                match std::fs::read_to_string(&file_path) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        self.set_error_message(&format!("Failed to read file: {}", e));
-                        // Remove from selected files since we couldn't read it
-                        self.selected_files.retain(|f| f != &file_path);
-                        return;
+            // Add the file content
+            match std::fs::read_to_string(&file_path) {
+                Ok(content) => {
+                    self.selected_files_content.push((file_path.clone(), content));
+                    
+                    // Set success message
+                    if let Some(file_name) = file_path.file_name() {
+                        self.set_success_message(&format!("Added '{}' to selected files", file_name.to_string_lossy()));
                     }
                 }
-            };
-            
-            // Add to selected files content
-            self.selected_files_content.push((file_path.clone(), content));
-            self.set_success_message(&format!("Added {} to selection. Total: {}", 
-                file_path.file_name().unwrap_or_default().to_string_lossy(),
-                self.selected_files.len()));
-            
-            // Update token count after adding a file
-            self.update_token_count();
+                Err(e) => {
+                    // Set error message
+                    self.set_error_message(&format!("Failed to read file: {}", e));
+                    
+                    // Remove the file from selected_files
+                    if let Some(idx) = self.selected_files.iter().position(|p| p == &file_path) {
+                        self.selected_files.remove(idx);
+                    }
+                }
+            }
         }
+        
+        // Update token count after modifying the selection
+        self.update_token_count();
+        debug!("Updated token count after toggle_file_selection: {}", self.token_count);
     }
     
     /// Fetch credits information
@@ -1328,7 +1324,25 @@ impl App {
     pub fn handle_prompt_key_with_context(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
         use crossterm::event::KeyCode;
         
+        // If we're already processing, ignore most key presses
+        if self.processing_state == ProcessingState::Processing {
+            // Only allow Escape to cancel the processing
+            if key.code == KeyCode::Esc {
+                self.processing_state = ProcessingState::Idle;
+                self.set_info_message("Request cancelled");
+            }
+            return Ok(());
+        }
+        
         match key.code {
+            KeyCode::Esc => {
+                // Return to file selection mode
+                self.mode = AppMode::FileSelection;
+                // Clear the prompt
+                self.current_prompt = String::new();
+                // Update token count
+                self.update_token_count();
+            }
             KeyCode::Enter => {
                 // Submit prompt with context
                 if !self.current_prompt.is_empty() {
@@ -1430,22 +1444,14 @@ impl App {
                     self.current_prompt.clear();
                 }
             }
-            KeyCode::Esc => {
-                // Go back to file selection
-                self.mode = AppMode::FileSelection;
-                // Clear the prompt
-                self.current_prompt = String::new();
-                // Update token count
-                self.update_token_count();
-            }
             KeyCode::Char(c) => {
                 self.current_prompt.push(c);
-                // Update token count
+                // Update token count immediately
                 self.update_token_count();
             }
             KeyCode::Backspace => {
                 self.current_prompt.pop();
-                // Update token count
+                // Update token count immediately 
                 self.update_token_count();
             }
             _ => {}
@@ -1816,24 +1822,27 @@ impl App {
         info!("Show explanation: {}", self.show_explanation);
     }
 
-    /// Update the context window size based on the selected model
-    pub fn update_context_window_size(&mut self) {
-        // Set context window size based on the selected model
-        // Currently only supporting Gemini Flash with 1M tokens
-        if self.selected_model.contains("gemini") {
-            self.context_window_size = 1_000_000; // 1M tokens for Gemini Flash
-        } else {
-            // Default to a conservative estimate for other models
-            self.context_window_size = 100_000;
-        }
-    }
-    
-    /// Count tokens in a string (simple approximation)
-    fn count_tokens(&self, text: &str) -> usize {
-        // Simple approximation: 1 token ≈ 4 characters for English text
-        // This is a rough estimate and not accurate for all languages or special tokens
+    /// Count tokens in a string (approximation)
+    pub fn count_tokens(&self, text: &str) -> usize {
+        // A more accurate token estimation that considers code structure
+        // For code, we count tokens more conservatively
+        
+        // First, count the characters
         let char_count = text.chars().count();
-        char_count / 4
+        
+        // Different languages tokenize differently, but a reasonable estimation
+        // is 4-6 characters per token for code
+        const CHARS_PER_TOKEN: f32 = 4.0;
+        
+        // Calculate tokens and add a 10% margin for safety
+        let token_estimate = (char_count as f32 / CHARS_PER_TOKEN).ceil() as usize;
+        let with_margin = (token_estimate as f32 * 1.1).ceil() as usize;
+        
+        // Log token estimates for debugging
+        debug!("Token estimate for text of {} chars: {} tokens (with margin: {})",
+               char_count, token_estimate, with_margin);
+        
+        with_margin
     }
     
     /// Update token count based on selected files and prompt
@@ -1842,13 +1851,42 @@ impl App {
         
         // Count tokens in selected files
         for (_, content) in &self.selected_files_content {
-            total_tokens += self.count_tokens(content);
+            let file_tokens = self.count_tokens(content);
+            debug!("File tokens: {}", file_tokens);
+            total_tokens += file_tokens;
         }
         
         // Count tokens in the prompt
-        total_tokens += self.count_tokens(&self.current_prompt);
+        let prompt_tokens = self.count_tokens(&self.current_prompt);
+        debug!("Prompt tokens: {}", prompt_tokens);
+        total_tokens += prompt_tokens;
+        
+        // Add a fixed overhead for system prompts and formatting
+        const SYSTEM_PROMPT_OVERHEAD: usize = 1000;
+        total_tokens += SYSTEM_PROMPT_OVERHEAD;
         
         // Update the token count
         self.token_count = total_tokens;
+        debug!("Total token count updated: {}", self.token_count);
+    }
+    
+    /// Update the context window size based on the selected model
+    pub fn update_context_window_size(&mut self) {
+        // Set context window size based on the selected model
+        if self.selected_model.contains("gemini") {
+            self.context_window_size = 1_000_000; // 1M tokens for Gemini
+        } else if self.selected_model.contains("claude") {
+            self.context_window_size = 200_000; // 200K tokens for Claude
+        } else if self.selected_model.contains("custom") {
+            // For custom models, use a conservative default
+            self.context_window_size = 100_000;
+        } else {
+            // Default to a conservative estimate for other models
+            self.context_window_size = 100_000;
+        }
+        
+        // Log the context window size
+        debug!("Context window size set to {} tokens for model {}", 
+               self.context_window_size, self.selected_model);
     }
 }

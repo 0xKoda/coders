@@ -6,14 +6,6 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap, Gauge, ListState},
     layout::{Layout, Constraint, Direction, Alignment, Rect},
     Frame,
-    backend::CrosstermBackend,
-    Terminal,
-};
-use anyhow::Result;
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
 // Color theme
@@ -372,7 +364,7 @@ fn render_file_selection(f: &mut Frame, app: &App, _area: Rect) {
             Constraint::Length(3),  // Title with current directory
             Constraint::Min(1),     // File list
             Constraint::Length(5),  // Selected files
-            Constraint::Length(3),  // Token count progress bar
+            Constraint::Length(3),  // Token count progress bar (using our new component)
             Constraint::Length(3),  // Instructions
         ].as_ref())
         .split(area);
@@ -463,35 +455,8 @@ fn render_file_selection(f: &mut Frame, app: &App, _area: Rect) {
     
     f.render_widget(selected_files, chunks[2]);
     
-    // Token count progress bar
-    let token_percentage = if app.context_window_size > 0 {
-        (app.token_count as f64 / app.context_window_size as f64 * 100.0).min(100.0)
-    } else {
-        0.0
-    };
-    
-    let token_count_text = format!(
-        "Context usage: {}/{} tokens ({:.1}%)",
-        app.token_count,
-        app.context_window_size,
-        token_percentage
-    );
-    
-    let progress_color = if token_percentage < 50.0 {
-        Color::Green
-    } else if token_percentage < 80.0 {
-        Color::Yellow
-    } else {
-        Color::Red
-    };
-    
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" Context Window Usage "))
-        .gauge_style(Style::default().fg(progress_color))
-        .ratio(token_percentage / 100.0)
-        .label(token_count_text);
-    
-    f.render_widget(gauge, chunks[3]);
+    // Token count progress bar (using our new component)
+    render_token_progress_bar(f, app, chunks[3]);
     
     // Instructions
     let instructions = Paragraph::new(
@@ -582,12 +547,13 @@ fn render_editor(f: &mut Frame, app: &App, area: Rect) {
     // We don't need to render message bar here as it's handled by the main render function
 }
 
-/// Render the sidebar with model info and selected files
+/// Render the sidebar with model info, selected files, and context usage
 fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Model info
+            Constraint::Length(3),  // Token count progress bar
             Constraint::Min(1),     // Selected files
         ].as_ref())
         .split(area);
@@ -599,6 +565,9 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(SECONDARY_COLOR));
     
     f.render_widget(model_paragraph, chunks[0]);
+    
+    // Token progress bar
+    render_token_progress_bar(f, app, chunks[1]);
     
     // Selected files
     let selected_files_text = if app.selected_files.is_empty() {
@@ -620,7 +589,7 @@ fn render_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(ACCENT_COLOR))
         .wrap(Wrap { trim: true });
     
-    f.render_widget(selected_files_paragraph, chunks[1]);
+    f.render_widget(selected_files_paragraph, chunks[2]);
 }
 
 /// Render the message bar
@@ -730,25 +699,29 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::Blue))
         .title(" Prompt Input ");
     
+    // First render the main block
+    f.render_widget(block.clone(), area);
     let inner_area = block.inner(area);
     
     // Split the area into sections
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),   // Token count progress bar (more prominent at the top)
             Constraint::Min(3),      // Prompt input area
-            Constraint::Length(3),   // Token count progress bar
             Constraint::Length(3),   // Instructions
         ])
         .split(inner_area);
     
     // Determine if we're processing or waiting for input
     if app.processing_state == ProcessingState::Processing {
-        // Show a "cooking" animation when processing
+        // Create a centered spinner overlay
+        let spinner_area = centered_rect(60, 40, area);
+        
         let spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spinner = spinner_chars[app.spinner_frame % spinner_chars.len()];
         
-        // Select just one cooking message based on spinner frame
+        // Select a cooking message based on spinner frame
         let cooking_messages = [
             "Thinking...",
             "Processing your request...",
@@ -760,27 +733,41 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
             "Consulting the AI oracle...",
         ];
         
-        // Use a slower rotation for messages - only change every 10 frames
+        // Use a slower rotation for messages
         let message_index = (app.spinner_frame / 10) % cooking_messages.len();
         let cooking_message = cooking_messages[message_index];
         
+        // Create a clear block to overlay
+        f.render_widget(Clear, spinner_area);
+        
+        // Create the spinner text with multiple lines
         let text = vec![
             Line::from(vec![
-                Span::styled(format!(" {} {} ", spinner, cooking_message), 
+                Span::styled(format!(" {} ", spinner), 
+                           Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(cooking_message, 
                            Style::default().fg(Color::Yellow)),
             ]),
+            Line::from(""),
             Line::from(vec![
-                Span::raw(""),
+                Span::styled("Please wait while your code is being processed...",
+                            Style::default().fg(Color::Gray)),
             ]),
         ];
         
-        let paragraph = Paragraph::new(text)
-            .style(Style::default().fg(Color::White))
-            .block(Block::default().borders(Borders::NONE))
+        // Render the spinner in a block with borders
+        let spinner_widget = Paragraph::new(text)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Processing "))
             .alignment(Alignment::Center);
         
-        f.render_widget(paragraph, chunks[0]);
+        f.render_widget(spinner_widget, spinner_area);
     } else {
+        // Render token count progress bar (always shown at the top)
+        render_token_progress_bar(f, app, chunks[0]);
+        
         // Show the prompt input area
         let prompt_text = if app.current_prompt.is_empty() {
             vec![
@@ -800,10 +787,10 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
         
         let prompt_paragraph = Paragraph::new(prompt_text)
             .style(Style::default().fg(Color::White))
-            .block(Block::default().borders(Borders::NONE))
+            .block(Block::default().borders(Borders::ALL).title(" Your Prompt "))
             .wrap(Wrap { trim: true });
         
-        f.render_widget(prompt_paragraph, chunks[0]);
+        f.render_widget(prompt_paragraph, chunks[1]);
         
         // Calculate cursor position
         if app.mode == AppMode::PromptInput && app.processing_state == ProcessingState::Idle {
@@ -816,66 +803,87 @@ pub fn render_prompt_input(f: &mut Frame, app: &App, area: Rect) {
                 let last_line_width = last_line.len() as u16;
                 
                 // Calculate cursor position within the visible area
-                let x = last_line_width.min(chunks[0].width.saturating_sub(1));
-                let y = (line_count as u16 - 1).min(chunks[0].height.saturating_sub(1));
+                let x = last_line_width.min(chunks[1].width.saturating_sub(2)) + 1;
+                let y = (line_count as u16 - 1).min(chunks[1].height.saturating_sub(2)) + 1;
                 
                 // Set cursor position
                 f.set_cursor(
-                    chunks[0].x + x,
-                    chunks[0].y + y
+                    chunks[1].x + x,
+                    chunks[1].y + y
                 );
             } else {
                 // Default cursor position at the beginning
-                f.set_cursor(chunks[0].x, chunks[0].y);
+                f.set_cursor(chunks[1].x + 1, chunks[1].y + 1);
             }
         }
+        
+        // Instructions
+        let instructions = if !app.selected_files.is_empty() {
+            format!("Enter: Submit | Esc: Back to file selection | Selected Files: {}", app.selected_files.len())
+        } else {
+            "Enter: Submit | Esc: Back to editor".to_string()
+        };
+        
+        let instructions_paragraph = Paragraph::new(instructions)
+            .style(Style::default().fg(Color::Gray))
+            .block(Block::default().borders(Borders::ALL))
+            .alignment(Alignment::Center);
+        
+        f.render_widget(instructions_paragraph, chunks[2]);
     }
-    
-    // Token count progress bar
+}
+
+/// Render a token progress bar
+fn render_token_progress_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Calculate token percentage
     let token_percentage = if app.context_window_size > 0 {
         (app.token_count as f64 / app.context_window_size as f64 * 100.0).min(100.0)
     } else {
         0.0
     };
     
+    // Create a formatted token display
+    let token_model_info = match app.selected_model.as_str() {
+        m if m.contains("gemini") => "Gemini (1M tokens)",
+        m if m.contains("claude") => "Claude (200K tokens)",
+        _ => "Custom model",
+    };
+    
+    // Format the token count with thousands separator for readability
+    let formatted_token_count = format!("{}", app.token_count);
+    let formatted_context_size = format!("{}", app.context_window_size);
+    
     let token_count_text = format!(
-        "Context usage: {}/{} tokens ({:.1}%)",
-        app.token_count,
-        app.context_window_size,
-        token_percentage
+        "Context Window Usage: {}/{} tokens ({:.1}%) - {}",
+        formatted_token_count,
+        formatted_context_size,
+        token_percentage,
+        token_model_info
     );
     
+    // Set color based on token usage percentage
     let progress_color = if token_percentage < 50.0 {
         Color::Green
     } else if token_percentage < 80.0 {
         Color::Yellow
-    } else {
+    } else if token_percentage < 95.0 {
         Color::Red
+    } else {
+        Color::Rgb(255, 0, 0) // Bright red for critical (>95%)
     };
     
+    // Create a gauge widget
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" Context Window Usage "))
-        .gauge_style(Style::default().fg(progress_color))
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .title(" Context Window Usage "))
+        .gauge_style(Style::default()
+            .fg(progress_color)
+            .bg(Color::Black))
         .ratio(token_percentage / 100.0)
         .label(token_count_text);
     
-    f.render_widget(gauge, chunks[1]);
-    
-    // Instructions
-    let instructions = if !app.selected_files.is_empty() {
-        "Enter: Submit | Esc: Back to file selection"
-    } else {
-        "Enter: Submit | Esc: Back to editor"
-    };
-    
-    let instructions_paragraph = Paragraph::new(instructions)
-        .style(Style::default().fg(Color::Gray))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-    
-    f.render_widget(instructions_paragraph, chunks[2]);
-    
-    f.render_widget(block, area);
+    f.render_widget(gauge, area);
 }
 
 /// Render a spinner overlay
