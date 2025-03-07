@@ -13,7 +13,7 @@ Coders is an AI-powered terminal user interface (TUI) tool that helps you edit c
 - **Explanation Panel**: View AI explanations for each code change
 - **Context Window Tracking**: Track the total prompt size and progress of the context window
 
-![Coders AI Assistant](tui.png)
+![Coders AI Assistant](repl.png)
 
 ## Getting Started
 
