@@ -17,10 +17,11 @@ Coders is an AI-powered terminal user interface (TUI) tool that helps you edit c
 
 ## Getting Started
 
-1. Launch the application with `cargo run`
-2. On first run, you'll be prompted to enter your OpenRouter API key
-3. Navigate the file browser to select a file to modify
-4. Press the appropriate key to perform actions (as shown in the command bar)
+1. Clone the repository: `git clone https://github.com/0xKoda/coders.git && cd coders`
+2. Launch the application with `cargo run`
+3. On first run, you'll be prompted to enter your OpenRouter API key
+4. Navigate the file browser to select a file to modify
+5. Press the appropriate key to perform actions (as shown in the command bar)
 
 ## Navigation and Controls
 
